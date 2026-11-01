@@ -30,6 +30,8 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 ROOT = HERE.parent
+# raglib.py 与本脚本同目录（skill 自带），优先这里；也兼容项目里 rag/ 的布局
+sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "rag"))
 
 

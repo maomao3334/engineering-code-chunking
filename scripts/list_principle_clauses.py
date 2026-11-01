@@ -20,8 +20,25 @@ import re
 import sys
 from pathlib import Path
 
-PRINCIPLE_RE = re.compile(r"(相适应|尚应符合|依照.{0,8}规定|应符合本规范)")
+PRINCIPLE_RE = re.compile(
+    r"(相适应"                      # 与原条款相适应
+    r"|尚应符合"                    # …尚应符合…
+    r"|依照.{0,8}规定"              # 依照…规定处罚
+    r"|应符合本规范"                # 应符合本规范附录X
+    r"|除本规范另有规定外"           # 除本规范另有规定外，应符合…
+    r"|尚应符合现行国家标准"         # 尚应符合现行国家标准《…》
+    r"|按现行国家标准.{0,20}执行"    # 按现行国家标准…执行
+    r")")
 NUM_RE = re.compile(r"\d")
+# 标准编号里的数字不算"具体数值"，否则引述条会被漏判
+CODE_RE = re.compile(r"(GB|JGJ|GBJ|CJJ)\s*\d+(?:\.\d+)*")
+
+
+def is_principle(body: str, pat=None) -> bool:
+    pre = pat or PRINCIPLE_RE
+    if not pre.search(body):
+        return False
+    return len(NUM_RE.findall(CODE_RE.sub("", body))) <= 1
 
 
 def main():
@@ -33,14 +50,13 @@ def main():
     sys.path.insert(0, str(Path(a.rag).resolve()))
     from raglib import Retriever  # noqa: E402
 
-    pre = re.compile(a.pattern) if a.pattern else PRINCIPLE_RE
+    pre = re.compile(a.pattern) if a.pattern else None
     r = Retriever()
 
     rows = []
     for k, v in r.parents.items():
-        b = v["body"]
-        if pre.search(b) and len(NUM_RE.findall(b)) <= 1:
-            rows.append((k, v["title"], len(b), b[:70].replace("\n", " ")))
+        if is_principle(v["body"], pre):
+            rows.append((k, v["title"], len(v["body"]), v["body"][:70].replace("\n", " ")))
 
     print(f"共 {len(rows)} 条 / 总 {len(r.parents)} 条"
           f"（占 {len(rows) / max(len(r.parents), 1) * 100:.1f}%）\n")
