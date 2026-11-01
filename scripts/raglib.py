@@ -303,16 +303,24 @@ class Retriever:
         return self.parents[parent]["text"] if parent in self.parents else ""
 
     def table_md(self, parent):
-        """该条引用的表，渲染成 Markdown 表格（修「表没进切片」这个硬伤）"""
+        """该条引用的表，渲染成 Markdown 表格（修「表没进切片」这个硬伤）
+
+        列数对齐：OCR 出来的表格每行列数常不一致（合并单元格被切开），
+        Markdown 表格必须严格等列，否则平台/大模型读表会错位。
+        这里一律补齐/截断到表头列数，缺的用「—」。
+        """
         tno = self.link.get(parent)
         t = self.tables.get(tno) if tno else None
         if not t:
             return ""
+        ncol = len(t["header"])
         L = [f"【{t['title'] or tno}】",
              "| " + " | ".join(t["header"]) + " |",
-             "|" + "|".join(["---"] * len(t["header"])) + "|"]
+             "|" + "|".join(["---"] * ncol) + "|"]
         for row in t["rows"]:
-            L.append("| " + " | ".join(x or "—" for x in row) + " |")
+            cells = [(x or "—") for x in row[:ncol]]
+            cells += ["—"] * (ncol - len(cells))
+            L.append("| " + " | ".join(cells) + " |")
         return "\n".join(L)
 
     def refs_of(self, parent):

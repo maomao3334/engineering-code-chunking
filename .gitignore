@@ -3,3 +3,8 @@
 .venv/
 Thumbs.db
 desktop.ini
+
+# 运行时产物（scan_defects 会生成在脚本目录）
+scripts/缺陷扫描报告.md
+*.xlsx
+
