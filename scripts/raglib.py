@@ -126,8 +126,13 @@ def load_tables():
             heads.setdefault(cn, head)
             rows[rn][cn] = val
         ncol = max(heads) if heads else 0
-        header = [heads.get(i, f"列{i}") for i in range(1, ncol + 1)]
-        body = [[rows[rn].get(i, "") for i in range(1, ncol + 1)] for rn in sorted(rows)]
+        # 表头就是第 1 行（OCR 认定的表头行）；数据从第 2 行起，
+        # 否则表头会被打印两次（一次作 header，一次作数据行）
+        first = min(rows) if rows else 1
+        header = [rows[first].get(i, heads.get(i, f"列{i}"))
+                  for i in range(1, ncol + 1)]
+        body = [[rows[rn].get(i, "") for i in range(1, ncol + 1)]
+                for rn in sorted(rows) if rn != first]
         tables[tno] = dict(title=title.get(tno, ""), header=header, rows=body)
     return link, tables
 

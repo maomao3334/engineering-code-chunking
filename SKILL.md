@@ -2,7 +2,7 @@
 name: engineering-code-chunking
 description: 把中国工程建设标准（GB 规范、消防规范、建筑设计规范等）的 PDF/OCR 文本切成可溯源、可检索的层级语料库（章/节/条/款 + 表格），并生成父子块 RAG 切片。用于"规范条文结构化""语料库建设""知识库切分""条文级检索溯源""消防规范问答"这类任务。已在两部真实规范上验证：GB 55037-2022 + 高层民用建筑消防安全管理规定（292 条 / 940 切片，20 题验收 20/20）、GB 50565-2010 纺织工程设计防火规范（172 条 / 281 切片，命中@3 12/13）。含 PDF 体检、图片表格 OCR、6 类解析踩坑与修法。不要用于没有编号层级的自由文本（用语义切分）。
 metadata:
-  version: "1.3.1"
+  version: "1.3.2"
   domain: 工程建设规范 / RAG 语料库
 ---
 
@@ -69,7 +69,7 @@ PDF → OCR(双遍300/600dpi，逐行择优) → 行重建 → 结构化解析 �
 
 各步细节见：
 - [references/pipeline.md](references/pipeline.md) — 完整流水线，含 OCR 参数与踩坑
-- [references/pdf-to-corpus-walkthrough.md](references/pdf-to-corpus-walkthrough.md) — **一次完整的实操记录**（GB 50565-2010 纺织规范，40页/172条）：PDF 体检先做什么、水印/空标记/图片表格三个坑、6 个解析踩坑与修法、从 9 处缺陷修到 1 处
+- [references/pdf-to-corpus-walkthrough.md](references/pdf-to-corpus-walkthrough.md) — **一次完整的实操记录**（GB 50565-2010 纺织规范，40页/172条）：PDF 体检先做什么、水印/空标记/图片表格三个坑、7 个解析踩坑与修法、**表格 OCR 四版迭代的正解**（数据框定列+锚点聚类+表头分离）、表格质量分级
 - [references/edge-cases.md](references/edge-cases.md) — 19 类边界情况（OCR丢号、跨页、上下标、表格合并单元格…）
 - [references/chunk-schema.md](references/chunk-schema.md) — 输出字段定义与切片 ID 规范
 - [references/quality-gates.md](references/quality-gates.md) — 质检项与验收标准
