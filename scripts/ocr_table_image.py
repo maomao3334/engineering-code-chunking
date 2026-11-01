@@ -1,157 +1,185 @@
 # -*- coding: utf-8 -*-
-"""阶段3（v4）：表格 OCR —— 固定网格，不搞 colspan 跳跃。
+"""阶段3（v8，定案）：结构取 pred_html（已验证正确），文字按单元格边界精确回填。
 
-前三版教训：
-    v1 只按 y 聚类 → 单元格内换行被拆成两行
-    v2 所有框 x0 聚类 → 表头合并单元格搅乱列边界，12 列里 6 列空
-    v3 用数据框定列（对！）但引入 colspan 跳跃 → 表头跨列把后面的列吃掉，
-       输出只剩 3 列
+教训：不要自己解释 logic_points 的坐标约定——踩了两次（顺序反了导致行列膨胀）。
+      rapid_table 的 **pred_html 是可靠的**（已实测：rowspan/colspan 正确、表头层级正确）。
+      所以：
+        结构  ← 解析 pred_html 的 <tr>/<td rowspan colspan>
+        文字  ← 按 cell_bboxes 多边形回填 OCR 框（避免默认输出的跨框粘连）
 
-v4 定案：**网格固定，格子只填不跳**
-    1. 列：用"数据框"（纯数字/倍杆）的 x 中心聚类定列，实测极规整
-       （6 列：248/328/394/426/454/514）。
-    2. 最左再加一列"行标签列"，边界取第一数据列中心 - 40（实测标签 x1≤198，中心 248）。
-    3. 行：用数据框 y 中心聚类定行。
-    4. 每个框按 **x 中心** 就近落到一列、按 y 中心就近落到一行，**不跳格**。
-       合并单元格的代价是文字落到起始列，但**列结构不会被破坏**。
+两层配合：HTML 给网格形状，几何回填给每格的干净文字。
 """
 import json
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 import fitz
-from rapidocr_onnxruntime import RapidOCR
+import numpy as np
+from rapid_table import RapidTable, RapidTableInput
 
 if len(sys.argv) < 2:
     sys.exit("用法：python ocr_table_image.py <规范.pdf>\n"
-             "把 PDF 里的大图（表格）OCR 后按坐标重建为行列网格，\n"
-             "输出到 <pdf目录>/_pipeline/tables_ocr.json")
+             "结构用 rapid_table(SLANet-Plus) 的 pred_html，文字按单元格几何回填。\n"
+             "依赖：pip install rapid_table rapidocr")
 
 PDF = sys.argv[1]
 CASE = Path(PDF).parent / "_pipeline"
 IMG_DIR = CASE / "table_imgs"
 IMG_DIR.mkdir(exist_ok=True)
-ocr = RapidOCR()
 
-ROMAN_FIX = [
-    (re.compile(r"(?<![A-Za-z])I(?=[、，,．.])"), "Ⅰ"),
+TEXT_FIX = [
+    (re.compile(r"^序台$"), "序号"),
+    (re.compile(r"^一内、"), "内、"),
+    # 上标（D02）：25000m2 → 25000m³；5000m3 → 5000m³
+    (re.compile(r"(\d)m2(?![0-9])"), r"\1m²"),
+    (re.compile(r"(\d)m3(?![0-9])"), r"\1m³"),
+    # 罗马数字（D04）：I、级 → Ⅰ、Ⅱ级；单独 I、 → Ⅰ、
+    (re.compile(r"(?<![A-Za-z])I、级"), "Ⅰ、Ⅱ级"),
+    (re.compile(r"(?<![A-Za-z])I、"), "Ⅰ、"),
     (re.compile(r"(?<![A-Za-z])II(?=[、，,．.])"), "Ⅱ"),
-    (re.compile(r"(?<![A-Za-z])III(?=[、，,．.])"), "Ⅲ"),
-]
-OCR_FIX = [
-    (re.compile(r"^注！$"), "注1"),
-    (re.compile(r"^[(（]000>$"), "≤5000m³"),
-    (re.compile(r"<501$"), "≤50t"),
 ]
 
 
 def fix_text(s):
-    for pat, rep in ROMAN_FIX + OCR_FIX:
+    for pat, rep in TEXT_FIX:
         s = pat.sub(rep, s)
-    return re.sub(r"Ⅰ、级", "Ⅰ、Ⅱ级", s)
+    # 括号配对：合并表头常出现 "（），" 这种
+    if s.count("（") != s.count("）"):
+        if s.count("（") < s.count("）"):
+            s = "（" * (s.count("）") - s.count("（")) + s
+        else:
+            s = s + "）" * (s.count("（") - s.count("）"))
+    return s
 
 
-def cluster_anchor(vals, gap):
-    order = sorted(range(len(vals)), key=lambda i: vals[i])
-    lab = [0] * len(vals)
-    cur, anchor = 0, vals[order[0]]
-    for k in range(1, len(order)):
-        v = vals[order[k]]
-        if v - anchor > gap:
-            cur += 1
-            anchor = v
-        lab[order[k]] = cur
-    mins = {}
-    for i, c in enumerate(lab):
-        mins[c] = min(mins.get(c, 1e9), vals[i])
-    remap = {c: i for i, c in enumerate(sorted(mins, key=lambda c: mins[c]))}
-    return [remap[c] for c in lab], len(mins)
+class HTMLTable(HTMLParser):
+    """解析 pred_html → 单元格列表 [(sr, sc, rs, cs)]"""
+
+    def __init__(self):
+        super().__init__()
+        self.rows, self._row, self._cell = [], None, None
+
+    def handle_starttag(self, tag, a):
+        a = dict(a)
+        if tag == "tr":
+            self._row = []
+        elif tag == "td" and self._row is not None:
+            self._cell = (int(a.get("rowspan", 1) or 1),
+                          int(a.get("colspan", 1) or 1))
+
+    def handle_endtag(self, tag):
+        if tag == "td" and self._cell is not None and self._row is not None:
+            self._row.append(self._cell)
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+    def layout(self):
+        """展开成 (n_row, n_col, [(sr, sc, rs, cs)])"""
+        if not self.rows:
+            return 0, 0, []
+        n_col = max(sum(cs for _, cs in r) for r in self.rows)
+        n_row = len(self.rows)
+        occ = [[False] * n_col for _ in range(n_row)]
+        out = []
+        for r, row in enumerate(self.rows):
+            c = 0
+            for rs, cs in row:
+                while c < n_col and occ[r][c]:
+                    c += 1
+                if c >= n_col:
+                    break
+                for dr in range(rs):
+                    for dc in range(cs):
+                        if r + dr < n_row and c + dc < n_col:
+                            occ[r + dr][c + dc] = True
+                out.append((r, c, rs, cs))
+                c += cs
+        return n_row, n_col, out
 
 
-def is_data_cell(t):
-    s = t.strip()
-    return bool(re.fullmatch(r"\d+(?:\.\d+)?", s)) or "倍" in s
+def poly_bounds(p):
+    a = np.array(p, dtype=float).reshape(-1, 2)
+    return a[:, 0].min(), a[:, 1].min(), a[:, 0].max(), a[:, 1].max()
 
 
-def rebuild(boxes):
-    if not boxes:
-        return [], dict(n_col=0, n_row=0, cols=[], rows=[])
+def build_table(img, engine):
+    res = engine(str(img))
+    html = res.pred_htmls[0] if len(res.pred_htmls) else ""
+    parser = HTMLTable()
+    parser.feed(html)
+    n_row, n_col, cells = parser.layout()
+    if not cells:
+        return [], [], 0
 
-    data = [b for b in boxes if is_data_cell(b[4])]
-    anchors = data if len(data) >= 4 else boxes
+    polys = res.cell_bboxes[0] if len(res.cell_bboxes) else []
+    polys = [poly_bounds(p) for p in polys]
 
-    # ---- 列中心（数据框）
-    dx = [(b[0] + b[2]) / 2 for b in anchors]
-    lab_c, n_data_col = cluster_anchor(dx, 20)
-    groups = {}
-    for c, x in zip(lab_c, dx):
-        groups.setdefault(c, []).append(x)
-    centers = [sum(groups[c]) / len(groups[c]) for c in sorted(groups)]
+    # OCR 框
+    ocr_out = engine.ocr_engine(str(img))
+    boxes = []
+    if getattr(ocr_out, "boxes", None) is not None:
+        for box, txt in zip(ocr_out.boxes, ocr_out.txts):
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            boxes.append(dict(cx=(min(xs) + max(xs)) / 2,
+                              cy=(min(ys) + max(ys)) / 2,
+                              y0=min(ys), x0=min(xs),
+                              t=str(txt).strip()))
 
-    # 加行标签列：中心取「第一数据列中心 - 80」（实测标签居中在 ~60~100）
-    all_centers = [centers[0] - 90] + centers
+    # HTML 单元格数应与多边形数一致；不一致则退回"多边形顺序"对应
+    grid = [["" for _ in range(n_col)] for _ in range(n_row)]
+    if len(polys) == len(cells):
+        areas = [(x1 - x0) * (y1 - y0) for (x0, y0, x1, y1) in polys]
 
-    # ---- 行中心（数据框）
-    dy = [(b[1] + b[3]) / 2 for b in anchors]
-    lab_r, n_row = cluster_anchor(dy, 21)
-    rgroups = {}
-    for c, y in zip(lab_r, dy):
-        rgroups.setdefault(c, []).append(y)
-    rcenters = [sum(rgroups[c]) / len(rgroups[c]) for c in sorted(rgroups)]
+        def owner_of(b):
+            """框中心落在哪些单元格里，返回面积最大的那个（父格优先）"""
+            hit = [i for i, (ax0, ay0, ax1, ay1) in enumerate(polys)
+                   if ax0 - 2 <= b["cx"] <= ax1 + 2
+                   and ay0 - 2 <= b["cy"] <= ay1 + 2]
+            return max(hit, key=lambda i: areas[i]) if hit else None
 
-    # ---- 表头区：第一个数据行中心之上的文字框，是表头（双层合并单元格）。
-    #      不把它并进第一条数据——实测会得到 "…1.厂外民用建筑" 这种混合格。
-    #      做法：表头按 y 再聚成若干行，放在数据行之前。
-    first_data_y = min(rcenters)
-    head_boxes = [b for b in boxes if (b[1] + b[3]) / 2 < first_data_y - 8]
-    head_rows = []
-    if head_boxes:
-        hy = [(b[1] + b[3]) / 2 for b in head_boxes]
-        hl, nh = cluster_anchor(hy, 16)
-        hgroups = {}
-        for c, y in zip(hl, hy):
-            hgroups.setdefault(c, []).append(y)
-        hcenters = [sum(hgroups[c]) / len(hgroups[c]) for c in sorted(hgroups)]
+        for i, ((sr, sc, rs, cs), (x0, y0, x1, y1)) in enumerate(zip(cells, polys)):
+            parts = []
+            for b in boxes:
+                if owner_of(b) == i:
+                    parts.append(b)
+            parts.sort(key=lambda b: (round(b["y0"]), b["x0"]))
+            grid[sr][sc] = fix_text("".join(p["t"] for p in parts))
+    else:
+        # 兜底：HTML 文字（会粘连，但至少有内容）
+        plain = re.findall(r"<td[^>]*>(.*?)</td>", html, re.S)
+        idx = 0
+        for sr, sc, rs, cs in cells:
+            if idx < len(plain):
+                grid[sr][sc] = fix_text(re.sub(r"<[^>]+>|\s+", "", plain[idx]))
+                idx += 1
 
-        def hci(xc):
-            return min(range(len(all_centers)),
-                       key=lambda i: abs(all_centers[i] - xc))
+    spans = [[sr, sc, rs, cs, grid[sr][sc]] for sr, sc, rs, cs in cells
+             if rs > 1 or cs > 1]
 
-        hcells = {}
-        for x0, y0, x1, y1, t in head_boxes:
-            xc, yc = (x0 + x1) / 2, (y0 + y1) / 2
-            ri = min(range(len(hcenters)), key=lambda i: abs(hcenters[i] - yc))
-            hcells.setdefault((ri, hci(xc)), []).append((y0, fix_text(t)))
-        for r in range(len(hcenters)):
-            head_rows.append([
-                "".join(p[1] for p in sorted(hcells.get((r, c), []), key=lambda p: p[0]))
-                for c in range(len(all_centers))])
-        # 表头行不参与数据行匹配
-        boxes = [b for b in boxes if (b[1] + b[3]) / 2 >= first_data_y - 8]
+    def is_num(s):
+        return bool(re.fullmatch(r"\d+(?:\.\d+)?", s.strip()))
 
-    # ---- 就近落格
-    cells = {}
-    for x0, y0, x1, y1, t in boxes:
-        xc, yc = (x0 + x1) / 2, (y0 + y1) / 2
-        ci = min(range(len(all_centers)), key=lambda i: abs(all_centers[i] - xc))
-        ri = min(range(len(rcenters)), key=lambda i: abs(rcenters[i] - yc))
-        cells.setdefault((ri, ci), []).append((y0, fix_text(t)))
+    # 数据行判定：行里有"行标签"（1. / 2. / 序号）**或**≥2 个纯数字。
+    # 只看数字会把「注1 注1 25 — 17」这种数据行误判成表头（实测表4.1.7）。
+    ROWLABEL = re.compile(r"^\s*\d+[.、]\s*\S")
 
-    grid = list(head_rows)
-    for r in range(n_row):
-        row = []
-        for c in range(len(all_centers)):
-            parts = sorted(cells.get((r, c), []), key=lambda p: p[0])
-            row.append("".join(p[1] for p in parts))
-        grid.append(row)
-
-    return grid, dict(n_col=len(all_centers), n_row=len(grid),
-                      cols=[round(x) for x in all_centers],
-                      rows=[round(y) for y in rcenters])
+    hrows = n_row
+    for i, row in enumerate(grid):
+        nnum = sum(1 for x in row if is_num(x))
+        has_label = any(ROWLABEL.match(str(x)) for x in row)
+        if nnum >= 2 or has_label:
+            hrows = i
+            break
+    return grid, spans, hrows
 
 
 def main():
+    engine = RapidTable(RapidTableInput())
     doc = fitz.open(PDF)
     tables = []
     for idx in range(doc.page_count):
@@ -164,18 +192,12 @@ def main():
                 pix = fitz.Pixmap(fitz.csRGB, pix)
             p = IMG_DIR / f"p{idx + 1}_{j}.png"
             pix.save(p)
-            result, _ = ocr(str(p))
-            if not result:
-                continue
-            boxes = []
-            for box, text, score in result:
-                xs = [q[0] for q in box]
-                ys = [q[1] for q in box]
-                boxes.append((min(xs), min(ys), max(xs), max(ys), text.strip()))
-            grid, meta = rebuild(boxes)
-            tables.append(dict(page=idx + 1, img=p.name, w=w, h=h, grid=grid, meta=meta))
-            print(f"  p{idx + 1} 图{j}: {w}x{h} 框{len(boxes)} → "
-                  f"{meta['n_row']}行×{meta['n_col']}列")
+            grid, spans, hrows = build_table(p, engine)
+            tables.append(dict(page=idx + 1, img=p.name, w=w, h=h, grid=grid,
+                               spans=spans, header_rows=hrows,
+                               n_row=len(grid), n_col=len(grid[0]) if grid else 0))
+            print(f"  p{idx + 1} 图{j}: {w}x{h} → {len(grid)}行×"
+                  f"{len(grid[0]) if grid else 0}列, 表头{hrows}行, 合并{len(spans)}")
     doc.close()
     out = CASE / "tables_ocr.json"
     out.write_text(json.dumps(tables, ensure_ascii=False, indent=1), encoding="utf-8")
