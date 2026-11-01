@@ -44,12 +44,16 @@ references/
   evaluation.md                           检索评测方法
   export-and-deploy.md                    导出到平台 / 免安装打包
   multi-standard-and-acceptance.md       并第二部规范 + 20 题验收自动跑分
+  retrieval-tuning.md                     检索调参实录：什么有效、什么试过没用
+  acceptance-design.md                    验收题设计：期望值先核实
 scripts/
   validate_chunks.py                      结构校验
   scan_defects.py                         12 类 OCR 字符缺陷扫描
   fix_defects.py                          自动修复
   compare_chunking.py                     四种切分策略对比实验
   export_for_platform.py                  导出 markdown/json/分段文本
+  diagnose_misses.py                      诊断"为什么没命中"（排名/分数/token 交集）
+  list_principle_clauses.py               列出原则/引述条款（检索降权依据）
 assets/                                   示例产出（评测集、缺陷报告、导出说明）
 ```
 
@@ -63,6 +67,10 @@ assets/                                   示例产出（评测集、缺陷报�
 python scripts/validate_chunks.py 语料库.xlsx       # 交付前必跑
 python scripts/scan_defects.py [语料库.xlsx]         # 12 类字符缺陷
 python scripts/compare_chunking.py --xlsx ...        # 切分方法对比实验
+
+# 检索没命中时，先诊断再调参，不要凭直觉改权重
+python scripts/diagnose_misses.py --rag ./rag --q "问题" --want 7.4.1
+python scripts/list_principle_clauses.py --rag ./rag  # 该降权的条款清单
 ```
 
 ## 实测数据（本方法在真实规范上的表现）
@@ -72,6 +80,12 @@ python scripts/compare_chunking.py --xlsx ...        # 切分方法对比实验
 - 20 道验收题自动跑分：**20/20**
 - 与参考库逐字比对：236/241 一致，5 条差异全部可解释
 
+### 含糊问法的短题（商家口吻，12 题）
+
+- 10 题准确 / 2 题正确拒答
+- 原则条款降权修复 1 题（7.4.1 从第 2 名到第 1 名），**其余 12 道回归题分数一字节未变**
+- 2 题确认是**验收期望值写错**（不是检索问题）——见 `acceptance-design.md`
+
 ## 适用范围 / 不适用
 
 ✅ GB / GBJ / JGJ 等有 `1` `1.0.1` `1 2 3` 编号层级的工程建设规范
@@ -79,7 +93,9 @@ python scripts/compare_chunking.py --xlsx ...        # 切分方法对比实验
 
 ## 版本
 
-当前冻结版本 **v1.1.0**：新增"并第二部规范（含法规）"与"20 题验收自动跑分"两块内容。
+- **v1.2.0**（当前）：新增「检索调参实录」（什么有效、什么试过没用）与「验收题设计」（期望值先核实）；
+  补充两个可复用诊断脚本 `diagnose_misses.py` / `list_principle_clauses.py`
+- v1.1.0：新增"并第二部规范（含法规）"与"20 题验收自动跑分"
 
 ## 许可
 

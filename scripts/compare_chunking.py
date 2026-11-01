@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """切分方法对比实验：证明"父子块切法"比"正则平切"好，且好多少
 
 对比四种切分策略（同一份原文、同一套检索器、同一组题目）：
@@ -171,11 +171,24 @@ def retrieve(chunks, q, mode, k=5):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--xlsx", default=r"F:\科研处\GB55037-2022_建筑防火通用规范_语料库_v3.xlsx")
+    ap = argparse.ArgumentParser(
+        description="四种切分策略对比实验（平切/固定长度/只切到条/父子块）")
+    ap.add_argument("--xlsx", default=None,
+                    help="语料库路径；不给则自动取当前目录版本号最大的 *语料库_v*.xlsx")
+    ap.add_argument("--pick", action="store_true",
+                    help="（兼容旧用法）强制自动定位语料库")
     a = ap.parse_args()
 
-    corpus = load_corpus(a.xlsx)
+    corpus_path = a.xlsx
+    if a.pick or not corpus_path or not Path(corpus_path).exists():
+        cands = [p for p in Path(".").glob("*语料库_v*.xlsx")
+                 if re.search(r"_v(\d+)\.xlsx$", p.name)]
+        if not cands:
+            ap.error("找不到语料库：请用 --xlsx 指定，或把语料库放到当前目录")
+        corpus_path = str(max(cands, key=lambda p: int(re.search(r"_v(\d+)", p.name).group(1))))
+        print(f"自动选用：{corpus_path}")
+
+    corpus = load_corpus(corpus_path)
     by_no = {c["no"]: c for c in corpus}
     kuan_by_no = {c["no"]: split_kuan(c["body"])[1] for c in corpus}
 
