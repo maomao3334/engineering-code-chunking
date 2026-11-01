@@ -308,22 +308,66 @@ class Retriever:
         return self.parents[parent]["text"] if parent in self.parents else ""
 
     def table_md(self, parent):
-        """该条引用的表，渲染成 Markdown 表格（修「表没进切片」这个硬伤）
+        """该条引用的表，渲染成「列索引 + 数据行」。
 
-        列数对齐：OCR 出来的表格每行列数常不一致（合并单元格被切开），
-        Markdown 表格必须严格等列，否则平台/大模型读表会错位。
-        这里一律补齐/截断到表头列数，缺的用「—」。
+        为什么要列索引：OCR 出来的竖排表头（"厂内主要道路"）会被拆成多行碎片，
+        数据行 `| 25 | 12 | 12 |` 里的 12 无法判断属于哪一列 —— **数据读不懂**。
+        做法：把表头区按列纵向拼接复原标题，先打印「列号→标题」映射，
+        再打印数据行，读取方就能按列序对齐。
+
+        列数对齐：每行列数常不一致（合并单元格被切开），一律补齐到 ncol。
         """
         tno = self.link.get(parent)
         t = self.tables.get(tno) if tno else None
         if not t:
             return ""
-        ncol = len(t["header"])
-        L = [f"【{t['title'] or tno}】",
-             "| " + " | ".join(t["header"]) + " |",
-             "|" + "|".join(["---"] * ncol) + "|"]
-        for row in t["rows"]:
-            cells = [(x or "—") for x in row[:ncol]]
+        # 原始网格 = header 行 + 数据行（load_tables 已把第 1 行当 header）
+        grid = [list(t["header"])] + [list(r) for r in t["rows"]]
+        ncol = len(t["header"]) or (len(grid[0]) if grid else 0)
+
+        # 数据行起点：第一行含 ≥2 个纯数字
+        def is_num(c):
+            return bool(re.fullmatch(r"\d+(?:\.\d+)?", str(c).strip()))
+
+        data_start = len(grid)
+        for i, row in enumerate(grid):
+            if sum(1 for c in row if is_num(c)) >= 2:
+                data_start = i
+                break
+
+        # 按列纵向拼表头
+        cols = []
+        for c in range(ncol):
+            parts = []
+            for row in grid[:data_start]:
+                v = str(row[c]).strip() if c < len(row) else ""
+                if v and v not in ("—", "-", "None"):
+                    parts.append(v)
+            title = "".join(parts)
+            # OCR 重复：同一短语被识别两次（"厂内厂内主要道路道路"）
+            for _ in range(3):
+                dup = re.match(r"^(.{2,5})\1", title)
+                if dup:
+                    title = dup.group(1) + title[len(dup.group(0)):]
+                dup2 = re.search(r"(.{2,5})\1$", title)
+                if dup2:
+                    title = title[:dup2.start()] + dup2.group(1)
+            cols.append(title)
+
+        # 注意：竖排表头的碎片（"道路厂内厂内主要道路道路" / "次要"）**没有修复**。
+        # 试过用正则把「上一列溢出到本列的碎片」拼回去，在表4.2.9 上失败——
+        # 本质是在猜数据。这类表只能做到「数值在」，列对应关系需人工核对，
+        # 已在「表格质量」页签逐表标注。详见 references/pdf-to-corpus-walkthrough.md。
+
+        L = [f"【{t['title'] or tno}】"]
+        named = [(i + 1, c) for i, c in enumerate(cols) if c]
+        if named:
+            L.append("列索引（数据行按此列序对齐）：")
+            L.append("  " + "；".join(f"列{i}={c}" for i, c in named))
+
+        body = grid[data_start:] if data_start < len(grid) else grid
+        for row in body:
+            cells = [str(x or "—") for x in row[:ncol]]
             cells += ["—"] * (ncol - len(cells))
             L.append("| " + " | ".join(cells) + " |")
         return "\n".join(L)
