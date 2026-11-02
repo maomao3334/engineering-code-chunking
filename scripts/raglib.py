@@ -249,11 +249,14 @@ def build_table_slices(meta, link, tables, facts=None, calibrated=None):
             for r, rowitems in byrow.items():
                 lab = next((x[1] for x in rowitems if x[1]), "")
                 hdr = f"{base_hdr}#r{r}｜{lab}"
-                LL = [f"事实（本行 {len(rowitems)} 条，可直接引用）："]
+                LL = [f"本片为「{t['title'] or tno}」中「{lab}」这一行；"
+                      f"下表每条均为：本行对象 与 该列对象 之间的防火间距（单位 m）。"]
                 for txt, _ in rowitems:
                     LL.append("  · " + txt)
                 LL.append(f"  ⚠ 以上事实仅限本表所列对象（{t['title']}）；"
                           f"若问题对象不在本表范围内，请勿套用。")
+                LL.append(f"  依据：《{m['name']}》{m['code']} 第{tid}条，原文第"
+                          f"{cal.get('page', '')}页。")
                 body = "\n".join(LL)
                 out.append(dict(
                     id=f"{m['code'].replace(' ', '')}::{tid}#{tno}#r{r}",
@@ -267,6 +270,8 @@ def build_table_slices(meta, link, tables, facts=None, calibrated=None):
         header = base_hdr
         L = []
         if fs:
+            L.append(f"本片为「{t['title'] or tno}」全表；"
+                     f"下表每条均为：行对象 与 列对象 之间的防火间距（单位 m）。")
             L.append(f"事实（共 {len(fs)} 条，可直接引用）：")
             for s in fs:
                 txt = s.get("text", "") if isinstance(s, dict) else str(s)
@@ -526,16 +531,11 @@ class Retriever:
         L = [f"【{t['title'] or tno}】"]
 
         # 事实句优先（人工校准列名后生成，读取方直接读句子即可）
+        #   **不抽样**：检索侧已按行拆片控制单块大小，
+        #   这里若再抽样会让答案整段丢失（实测抽样后严格问答 6/6 -> 2/6）。
         fs = self.facts.get(tno) or []
         if fs:
-            total = len(fs)
-            if total > MAX_TABLE_FACTS:
-                step = total / MAX_TABLE_FACTS
-                fs = [fs[int(i * step)] for i in range(MAX_TABLE_FACTS)]
-                L.append(f"事实（共 {total} 条，此处列 {len(fs)} 条，"
-                         f"完整清单见语料库「表格事实」页签）：")
-            else:
-                L.append(f"事实（共 {total} 条，可直接引用）：")
+            L.append(f"事实（共 {len(fs)} 条，可直接引用）：")
             for s in fs:
                 txt = s.get("text", "") if isinstance(s, dict) else str(s)
                 L.append("  · " + txt)
@@ -545,21 +545,20 @@ class Retriever:
             L.append(f"  ⚠ 以上事实仅限本表所列对象（{t['title']}）；"
                      f"若问题对象不在本表范围内，请勿套用，应另查其他表或说明查不到。")
 
-        named = [(i + 1, c) for i, c in enumerate(cols) if c]
-        if named:
-            L.append("列索引（数据行按此列序对齐）：")
-            L.append("  " + "；".join(f"列{i}={c}" for i, c in named))
-
-        # 原始数据行：
-        #   · 有校准 grid_rows 时用它（视觉读图逐格核对过），**不输出 OCR 坏网格**
-        #     实测：OCR 网格把 "12 12" 粘成 "1212"、把行标签 "20" 混进数据列，
-        #     和上面的事实句直接矛盾，会误导读取方。
-        #   · 没有校准时才回退到 OCR 网格，并明确标注不可靠。
+        # 列索引 / 数据行：
+        #   · 有校准数据就用它（视觉读图逐格核对过），**不输出 OCR 坏网格**
+        #     实测：OCR 列索引是 "可燃液体罐区甲、乙类(总储量(00)"、
+        #     "（（甲、乙类2由）仓库除外）" 这种碎片，与上面正确的事实句矛盾。
+        #   · 没有校准时才回退 OCR，并明确标注不可靠。
         cal = getattr(self, "calibrated", {}).get(tno) or {}
         grows = cal.get("grid_rows")
+        ccols = {int(k): v for k, v in (cal.get("cols") or {}).items() if v}
         if grows:
-            keys = sorted((int(k) for k in cal.get("cols", {})), key=int)
+            keys = sorted(ccols) or sorted((int(k) for k in cal.get("cols", {})), key=int)
             rlabels = {int(k): v for k, v in (cal.get("row_labels") or {}).items()}
+            if ccols:
+                L.append("列索引（已校准）：")
+                L.append("  " + "；".join(f"列{k}={ccols[k]}" for k in sorted(ccols)))
             L.append("数据行（视觉读图 + 逐块核对，未列出的格为「—」）：")
             L.append("  行标签 | " + " | ".join(str(k) for k in keys))
             for r in sorted(int(x) for x in grows):
@@ -568,14 +567,26 @@ class Retriever:
                 for i in range(len(keys)):
                     v = vals[i] if i < len(vals) else None
                     cells.append(str(v) if v is not None else "—")
-                L.append(f"  {rlabels.get(r, '')[:34]} | " + " | ".join(cells))
-        else:
-            body = grid[data_start:] if data_start < len(grid) else grid
-            L.append("原始数据行（OCR 网格，列对齐可能有偏差，以事实句为准）：")
-            for row in body:
-                cells = [str(x or "—") for x in row[:ncol]]
-                cells += ["—"] * (ncol - len(cells))
-                L.append("| " + " | ".join(cells) + " |")
+                L.append(f"  {rlabels.get(r, '')} | " + " | ".join(cells))
+            tc = cal.get("text_cells") or {}
+            if tc:
+                L.append("  （文字格，非数值）：")
+                for r, d in tc.items():
+                    L.append(f"    {rlabels.get(int(r), '')} | " +
+                             " | ".join(f"列{k}={v}" for k, v in d.items()))
+            return "\n".join(L)
+
+        # 无校准数据：回退 OCR 网格，并明确标注不可靠
+        named = [(i + 1, c) for i, c in enumerate(cols) if c]
+        if named:
+            L.append("列索引（OCR 原样，列对齐可能有偏差）：")
+            L.append("  " + "；".join(f"列{i}={c}" for i, c in named))
+        body = grid[data_start:] if data_start < len(grid) else grid
+        L.append("原始数据行（OCR 网格，以事实句为准）：")
+        for row in body:
+            cells = [str(x or "—") for x in row[:ncol]]
+            cells += ["—"] * (ncol - len(cells))
+            L.append("| " + " | ".join(cells) + " |")
         return "\n".join(L)
 
     def refs_of(self, parent):

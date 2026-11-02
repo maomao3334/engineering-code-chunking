@@ -62,12 +62,34 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
 
     # ---------- 1. 一条条文一个 .md 文件 ----------
+    #     带大表的条文（事实句多）**按行再拆**：平台按 500~1000 字分段，
+    #     一个 29KB 的 md 会被切碎、且碎片之间丢失表名上下文。
+    #     实测：表4.2.10 有 140 条事实，整条导出 29KB；按行拆后每片 ~2.5KB。
+    MAX_MD_CHARS = 4000
     single = []
     for no, p in sorted(r.parents.items(), key=lambda kv: _sortkey(kv[0])):
         text = r.render_expanded(no)          # 含所有款 + 关联表 + 被引用条
         title = p["title"] or ""
-        fname = f"{no} {safe_name(title)}.md"
-        (md_dir / fname).write_text(text, encoding="utf-8")
+        base_name = f"{no} {safe_name(title)}"
+
+        tbl_slices = [s for s in r.table_slices if s["parent"] == no]
+        if len(text) > MAX_MD_CHARS and len(tbl_slices) > 1:
+            # 条文正文单独一片
+            head = r.parents[no]["text"]
+            (md_dir / f"{base_name}.md").write_text(head, encoding="utf-8")
+            written = [f"{base_name}.md"]
+            # 每个表格分片单独成文件，文件名带行标识
+            for i, ts in enumerate(tbl_slices, 1):
+                lv = ts["level"].split("·")[-1].rstrip("）")
+                fn = f"{base_name} 表格{i}_{safe_name(lv)}.md"
+                (md_dir / fn).write_text(ts["header"] + "\n" + ts["body"],
+                                        encoding="utf-8")
+                written.append(fn)
+            fname = f"{base_name}.md（+{len(tbl_slices)} 个表格分片）"
+        else:
+            fname = f"{base_name}.md"
+            (md_dir / fname).write_text(text, encoding="utf-8")
+            written = [fname]
 
         single.append({
             "条号": no,
