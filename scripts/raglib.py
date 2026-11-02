@@ -36,7 +36,10 @@ def _find_corpus():
         if m:
             cands.append((int(m.group(1)), p))
     if not cands:
-        raise FileNotFoundError(f"在 {root} 找不到 *语料库_v*.xlsx")
+        # 找不到时**不抛错**：build_table_slices 等纯函数不依赖 XLSX，
+        # 生成流水线（先算切片、后写 xlsx）需要能加载本模块。
+        # 真正用到 XLSX 的 load_* 会自己报错。
+        return None
     return str(max(cands)[1])
 
 
@@ -104,6 +107,8 @@ def load_facts(structured=False):
     """
     if structured:
         import json as _json
+        if not XLSX:
+            return {}
         p = Path(XLSX).parent / "_pipeline" / "table_facts.json"
         if p.exists():
             try:
@@ -140,6 +145,8 @@ def load_calibrated():
     没有显式 grid_rows 时返回空，调用方回退到 OCR 网格并标注不可靠。
     """
     import json as _json
+    if not XLSX:
+        return {}
     p = Path(XLSX).parent / "_pipeline" / "table_columns_calibrated.json"
     if not p.exists():
         return {}
@@ -233,6 +240,10 @@ def build_table_slices(meta, link, tables, facts=None, calibrated=None):
         fs = facts.get(tno) or []
         cal = (calibrated or {}).get(tno) or {}
         grows = cal.get("grid_rows")
+        # 反向速查片需要这三样（在校准数据里）
+        grows_data = grows
+        ccols = {int(k): v for k, v in (cal.get("cols") or {}).items() if v}
+        rlabels_data = {int(k): v for k, v in (cal.get("row_labels") or {}).items()}
 
         # ---- 事实多 → 按行拆成多个子块
         #      facts 可能是纯字符串（从 xlsx 读）或 dict（从 JSON 读），两种都处理
@@ -264,6 +275,65 @@ def build_table_slices(meta, link, tables, facts=None, calibrated=None):
                     title=f"{t['title'] or tno}（{lab}）",
                     text=hdr + "\n" + body, header=hdr, body=body,
                     chars=len(body), page_from=None, page_to=None))
+
+            # ---- 额外生成一个「速查汇总」分片，专供**反向检索**
+            #      为什么需要：按行拆片后，"哪些对象与X的间距是10m" 这类反向问题
+            #      需要覆盖全部行分片，而 top-k 只取少数块 → 必然漏行。
+            #      实测：「厂内主要道路」列 5 个 10m 恰好都落在高分片里才答全，
+            #      换「厂内铁路」列就会漏。
+            #      汇总片把所有「列 → 值 → 行清单」倒排出来，一张片就能答全。
+            if grows_data and ccols:
+                summ = []
+                kk = sorted(ccols)
+                # 行标签太长（30~50 字），全部内联会让速查片膨胀到 4600+ 字。
+                # 改用「行号引用」：先给行清单，再用编号指代。
+                rl = sorted(int(x) for x in grows_data)
+                summ.append("行号对照（下文用 R序号 指代）：")
+                for i, r in enumerate(rl):
+                    summ.append(f"  R{i}={rlabels_data.get(r, '')}")
+                summ.append("")
+                summ.append("列 → 值 → 对象行号：")
+                for ci, col in enumerate(kk):
+                    buckets = {}
+                    for i, r in enumerate(rl):
+                        vals = grows_data[str(r)]
+                        v = vals[ci] if ci < len(vals) else None
+                        if v is None:
+                            continue
+                        buckets.setdefault(str(v), []).append(f"R{i}")
+                    if not buckets:
+                        continue
+                    parts = []
+                    for v in sorted(buckets, key=lambda x: (len(x), x)):
+                        parts.append(f"{v}={{{','.join(buckets[v])}}}")
+                    summ.append(f"  「{ccols[col]}」：" + "；".join(parts))
+                if summ:
+                    hdr2 = base_hdr + "｜反向速查（列→值→行号）"
+                    # 反向问题（"哪些对象与X的间距是Y"）的查询词主要是
+                    # 表名 + 列名 + 数值。速查片本身短，BM25 里长度归一化会吃亏
+                    # （实测排第 14 名）。所以开头把关键词**显式重复一遍**，
+                    # 提高词频与命中率。
+                    _keys = "；".join(ccols[k] for k in sorted(ccols))
+                    _title = t["title"] or tno
+                    body2 = (
+                        f"反向速查表：{_title}。\n"
+                        f"本表全部列名：{_keys}。\n"
+                        f"本表全部行对象："
+                        + "、".join(rlabels_data.get(r, "") for r in rl) + "。\n"
+                        f"（上列关键词用于反向检索："
+                        f"哪些对象与某列的某项数值对应、某列等于某值的行有哪些。）\n\n"
+                        "本片按「列 → 数值 → 等于此值的行号」倒排，"
+                        "把行号换回下面的行名称即可作答。\n"
+                        + "\n".join(summ) +
+                        f"\n  ⚠ 仅限本表（{_title}）；某值下未出现的行号表示该格无要求。\n"
+                        f"  依据：《{m['name']}》{m['code']} 第{tid}条，"
+                        f"原文第{cal.get('page', '')}页。")
+                    out.append(dict(
+                        id=f"{m['code'].replace(' ', '')}::{tid}#{tno}#sum",
+                        parent=tid, level=f"表（反向速查·{tno}）",
+                        title=f"{t['title'] or tno}（反向速查：列→值→对象）",
+                        text=hdr2 + "\n" + body2, header=hdr2, body=body2,
+                        chars=len(body2), page_from=None, page_to=None))
             continue
 
         # ---- 事实少 → 整表一个子块

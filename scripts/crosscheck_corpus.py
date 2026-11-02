@@ -139,8 +139,19 @@ def main():
             ok = False
 
     # 7 对账
-    exp = len(rows) + n_item + n_tbl
-    print(f"\n7. 切片对账: 期望 {len(rows)}父+{n_item}款+{n_tbl}表={exp}，"
+    #   注意：表格切片数 ≠ 表数量。一张大表会按行拆成多个切片，
+    #   还会额外生成一个「反向速查」片。所以这里直接统计切片里以「表」开头的层级。
+    import openpyxl as _ox
+    _wb = _ox.load_workbook(str(a.xlsx), read_only=True)
+    _ws = _wb["RAG切片"]
+    n_tblslice = 0
+    for _r in _ws.iter_rows(min_row=2, values_only=True):
+        if _r[2] and str(_r[2]).startswith("表（"):
+            n_tblslice += 1
+    _wb.close()
+    exp = len(rows) + n_item + n_tblslice
+    print(f"\n7. 切片对账: 期望 {len(rows)}父+{n_item}款+{n_tblslice}表切片"
+          f"（{n_tbl} 张表按行拆分+速查）={exp}，"
           f"实际 {n_slice} → {'✓' if n_slice == exp else '✗'}")
     ok &= (n_slice == exp)
 
