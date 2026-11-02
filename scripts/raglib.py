@@ -96,13 +96,26 @@ def load_slices():
     return out
 
 
-def load_facts():
-    """读「表格事实」页签 → {表号: [事实句, ...]}
+def load_facts(structured=False):
+    """读表格事实 → {表号: [事实句 或 dict, ...]}
 
-    人工校准列名后生成的自包含事实句。这类句子对表格问答最有效：
-    读取方不需要理解表格结构，直接读句子就能答。
-    页签不存在时返回空（老语料库兼容）。
+    structured=True 时优先读 _pipeline/table_facts.json（带 row/row_label/col_label），
+    按行拆切片需要这些字段；读不到则回退到 xlsx 页签的纯字符串。
     """
+    if structured:
+        import json as _json
+        p = Path(XLSX).parent / "_pipeline" / "table_facts.json"
+        if p.exists():
+            try:
+                raw = _json.loads(p.read_text(encoding="utf-8"))
+                out2 = defaultdict(list)
+                for f in raw:
+                    out2[str(f["table"])].append(f)
+                return dict(out2)
+            except Exception:
+                pass
+
+    # 回退：读 xlsx 的「表格事实」页签（纯字符串，无行/列字段）
     import openpyxl
     try:
         wb = openpyxl.load_workbook(XLSX, read_only=True)
@@ -118,6 +131,22 @@ def load_facts():
             out[str(r[0])].append(str(r[6]))
     wb.close()
     return dict(out)
+
+
+def load_calibrated():
+    """读人工/视觉校准的表格结构 → {表号: {cols, row_labels, grid_rows}}
+
+    优先从语料库的「表格事实」页签反推（列标签/行标签都在里面）；
+    没有显式 grid_rows 时返回空，调用方回退到 OCR 网格并标注不可靠。
+    """
+    import json as _json
+    p = Path(XLSX).parent / "_pipeline" / "table_columns_calibrated.json"
+    if not p.exists():
+        return {}
+    try:
+        return _json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def load_tables():
@@ -173,33 +202,97 @@ def load_meta():
     return meta
 
 
-def build_table_slices(meta, link, tables, facts=None):
-    """把表格做成独立子块（切片ID: 编号::条号#表号），父条号指回条文
+MAX_TABLE_FACTS = 40      # 单表切片里最多列多少条事实句（超过则均匀抽样）
 
-    这就是硬伤 A 的正解：表格本来在切片体系之外，检索永远捞不到。
-    含人工校准后生成的事实句 —— 那是表格能被"读懂"的关键。
+
+def build_table_slices(meta, link, tables, facts=None, calibrated=None):
+    """把表格做成独立子块，父条号指回条文。
+
+    两种切片粒度（按事实数自动选）：
+
+    **少事实（≤40 条）**：一张表 = 一个子块
+        ID: 编号::条号#表号
+
+    **多事实（>40 条，如 4.2.10 有 140 条）**：**按行拆成多个子块**
+        ID: 编号::条号#表号#r行号
+        为什么不抽样：实测抽样 40/140 后严格问答从 6/6 掉到 2/6 ——
+        答案被抽掉的格子就永远查不到了。
+        按行拆的好处：每片仍自包含（一行的 15 个值都在），
+        切得更细反而让检索更准（BM25 不会被无关行稀释）。
     """
     facts = facts or {}
+
     out = []
     for tid, tno in link.items():
         t = tables.get(tno)
         m = meta.get(tid)
         if not t or not m:
             continue
-        header = (f"《{m['name']}》{m['code']}｜{m['zhang']}｜{m['jie']}｜"
-                  f"第{tid}条｜{t['title'] or tno}｜表格")
-        L = []
+        base_hdr = (f"《{m['name']}》{m['code']}｜{m['zhang']}｜{m['jie']}｜"
+                    f"第{tid}条｜{t['title'] or tno}｜表格")
         fs = facts.get(tno) or []
+        cal = (calibrated or {}).get(tno) or {}
+        grows = cal.get("grid_rows")
+
+        # ---- 事实多 → 按行拆成多个子块
+        #      facts 可能是纯字符串（从 xlsx 读）或 dict（从 JSON 读），两种都处理
+        if len(fs) > MAX_TABLE_FACTS:
+            from collections import OrderedDict
+            byrow = OrderedDict()
+            for i, f in enumerate(fs):
+                if isinstance(f, dict):
+                    r, txt, lab = f.get("row", i), f.get("text", ""), f.get("row_label", "")
+                else:
+                    # 字符串形态：用序号当行号（每 MAX 条归一组，避免无法分组）
+                    r, txt, lab = i // 15, str(f), ""
+                byrow.setdefault(r, []).append((txt, lab))
+            for r, rowitems in byrow.items():
+                lab = next((x[1] for x in rowitems if x[1]), "")
+                hdr = f"{base_hdr}#r{r}｜{lab}"
+                LL = [f"事实（本行 {len(rowitems)} 条，可直接引用）："]
+                for txt, _ in rowitems:
+                    LL.append("  · " + txt)
+                LL.append(f"  ⚠ 以上事实仅限本表所列对象（{t['title']}）；"
+                          f"若问题对象不在本表范围内，请勿套用。")
+                body = "\n".join(LL)
+                out.append(dict(
+                    id=f"{m['code'].replace(' ', '')}::{tid}#{tno}#r{r}",
+                    parent=tid, level=f"表（子块·{tno}·r{r}）",
+                    title=f"{t['title'] or tno}（{lab}）",
+                    text=hdr + "\n" + body, header=hdr, body=body,
+                    chars=len(body), page_from=None, page_to=None))
+            continue
+
+        # ---- 事实少 → 整表一个子块
+        header = base_hdr
+        L = []
         if fs:
             L.append(f"事实（共 {len(fs)} 条，可直接引用）：")
             for s in fs:
-                L.append("  · " + s)
+                txt = s.get("text", "") if isinstance(s, dict) else str(s)
+                L.append("  · " + txt)
             L.append(f"  ⚠ 以上事实仅限本表所列对象（{t['title']}）；"
                      f"若问题对象不在本表范围内，请勿套用。")
-        L.append("| " + " | ".join(t["header"]) + " |")
-        L.append("|" + "|".join(["---"] * len(t["header"])) + "|")
-        for row in t["rows"]:
-            L.append("| " + " | ".join(x or "—" for x in row) + " |")
+
+        # 数据行：有视觉校准的 grid_rows 就用它，**不输出 OCR 坏网格**
+        #   实测 OCR 网格把 "12 12" 粘成 "1212"、把行标签混进数据列，
+        #   和上面的事实句直接矛盾。
+        if grows:
+            keys = sorted((int(k) for k in cal.get("cols", {})), key=int)
+            rlabels = {int(k): v for k, v in (cal.get("row_labels") or {}).items()}
+            L.append("数据行（视觉读图 + 逐块核对，未列出的格为「—」）：")
+            L.append("  行标签 | " + " | ".join(str(k) for k in keys))
+            for r in sorted(int(x) for x in grows):
+                vals = grows[str(r)]
+                cells = [str(vals[i]) if i < len(vals) and vals[i] is not None else "—"
+                         for i in range(len(keys))]
+                L.append(f"  {rlabels.get(r, '')[:30]} | " + " | ".join(cells))
+        else:
+            L.append("原始数据行（OCR 网格，列对齐可能有偏差，以事实句为准）：")
+            L.append("| " + " | ".join(t["header"]) + " |")
+            L.append("|" + "|".join(["---"] * len(t["header"])) + "|")
+            for row in t["rows"]:
+                L.append("| " + " | ".join(x or "—" for x in row) + " |")
         body = "\n".join(L)
         out.append(dict(
             id=f"{m['code'].replace(' ', '')}::{tid}#{tno}", parent=tid,
@@ -264,9 +357,10 @@ class Retriever:
         self.child_weight = child_weight   # 子块分数折算（款太短，太容易"局部匹配"压过正确的条）
         self.use_boost = use_boost         # 「使用期/管理类」问题的章节路由加权
         self.link, self.tables = load_tables()
-        self.facts = load_facts()      # 表号 -> [事实句]，人工校准列名后生成
+        self.facts = load_facts(structured=True)   # 表号 -> [fact dict]，带 row/col 便于按行拆片
+        self.calibrated = load_calibrated()   # 表号 -> {cols, row_labels, grid_rows}
         base = load_slices()
-        self.table_slices = build_table_slices(load_meta(), self.link, self.tables, self.facts)
+        self.table_slices = build_table_slices(load_meta(), self.link, self.tables, self.facts, self.calibrated)
 
         # 去重：语料库的「RAG切片」页签里**已含**表格子块（生成时写进去的），
         # 这里又 build 一遍 → 同一 ID 出现两份，一份含事实句一份不含。
@@ -348,20 +442,28 @@ class Retriever:
 
     # ---------- 拼接上下文 ----------
     def render(self, parent, with_table=True, with_refs=False):
-        """父块全文（章/节/条元数据头 + 全部款）
+        """父块全文（章/节/条元数据头 + 全部款）+ 关联表格
 
         **必须带上关联表格**：表格是条文的一部分。
         实测踩过：条文写"不应小于表4.1.7 的规定"，但检索只返回这一句，
         表里的事实句/数值全拿不到 → 表格题 0/8 答对。
+
+        表格内容**直接用已构建的 table_slices**（含按行分片与视觉校准数据），
+        不要再走 table_md 从 tables 重新渲染 —— 实测那样会漏掉分片、
+        且用回 OCR 坏网格，与事实句自相矛盾。
         """
         base = self.parents[parent]["text"] if parent in self.parents else ""
         if not base:
             return ""
         parts = [base]
         if with_table:
-            tm = self.table_md(parent)
-            if tm:
-                parts.append(tm)
+            ts = [s for s in self.table_slices if s["parent"] == parent]
+            if ts:
+                parts.extend(s["body"] for s in ts)
+            else:
+                tm = self.table_md(parent)
+                if tm:
+                    parts.append(tm)
         if with_refs:
             for rno in self.refs_of(parent):
                 rp = self.parents.get(rno)
@@ -426,9 +528,17 @@ class Retriever:
         # 事实句优先（人工校准列名后生成，读取方直接读句子即可）
         fs = self.facts.get(tno) or []
         if fs:
-            L.append(f"事实（共 {len(fs)} 条，可直接引用）：")
+            total = len(fs)
+            if total > MAX_TABLE_FACTS:
+                step = total / MAX_TABLE_FACTS
+                fs = [fs[int(i * step)] for i in range(MAX_TABLE_FACTS)]
+                L.append(f"事实（共 {total} 条，此处列 {len(fs)} 条，"
+                         f"完整清单见语料库「表格事实」页签）：")
+            else:
+                L.append(f"事实（共 {total} 条，可直接引用）：")
             for s in fs:
-                L.append("  · " + s)
+                txt = s.get("text", "") if isinstance(s, dict) else str(s)
+                L.append("  · " + txt)
             # 防止误用：事实句只适用于**本表对象**。
             # 实测踩过：问"生产厂房与厂内主要道路"时，检索把堆场表(4.2.9)的
             # 事实句给了 AI，用户会误以为那就是答案。
@@ -440,12 +550,32 @@ class Retriever:
             L.append("列索引（数据行按此列序对齐）：")
             L.append("  " + "；".join(f"列{i}={c}" for i, c in named))
 
-        body = grid[data_start:] if data_start < len(grid) else grid
-        L.append("原始数据行：")
-        for row in body:
-            cells = [str(x or "—") for x in row[:ncol]]
-            cells += ["—"] * (ncol - len(cells))
-            L.append("| " + " | ".join(cells) + " |")
+        # 原始数据行：
+        #   · 有校准 grid_rows 时用它（视觉读图逐格核对过），**不输出 OCR 坏网格**
+        #     实测：OCR 网格把 "12 12" 粘成 "1212"、把行标签 "20" 混进数据列，
+        #     和上面的事实句直接矛盾，会误导读取方。
+        #   · 没有校准时才回退到 OCR 网格，并明确标注不可靠。
+        cal = getattr(self, "calibrated", {}).get(tno) or {}
+        grows = cal.get("grid_rows")
+        if grows:
+            keys = sorted((int(k) for k in cal.get("cols", {})), key=int)
+            rlabels = {int(k): v for k, v in (cal.get("row_labels") or {}).items()}
+            L.append("数据行（视觉读图 + 逐块核对，未列出的格为「—」）：")
+            L.append("  行标签 | " + " | ".join(str(k) for k in keys))
+            for r in sorted(int(x) for x in grows):
+                vals = grows[str(r)]
+                cells = []
+                for i in range(len(keys)):
+                    v = vals[i] if i < len(vals) else None
+                    cells.append(str(v) if v is not None else "—")
+                L.append(f"  {rlabels.get(r, '')[:34]} | " + " | ".join(cells))
+        else:
+            body = grid[data_start:] if data_start < len(grid) else grid
+            L.append("原始数据行（OCR 网格，列对齐可能有偏差，以事实句为准）：")
+            for row in body:
+                cells = [str(x or "—") for x in row[:ncol]]
+                cells += ["—"] * (ncol - len(cells))
+                L.append("| " + " | ".join(cells) + " |")
         return "\n".join(L)
 
     def refs_of(self, parent):
