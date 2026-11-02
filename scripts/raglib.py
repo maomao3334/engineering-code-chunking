@@ -531,6 +531,15 @@ class Retriever:
         if not base:
             return ""
         parts = [base]
+
+        # 款 + 附录子块：都在 children 里。
+        #   原来 render 只拼 base，导致附录父块只有 351 字摘要，
+        #   问"二硫化碳库属于几类"取不到具体条目（实测 12/14 附录题失败）。
+        for k in self.children.get(parent, []):
+            if "表（" in k["level"]:
+                continue                      # 表格行分片在下面单独加
+            parts.append(k["body"])
+
         if with_table:
             ts = [s for s in self.table_slices if s["parent"] == parent]
             if ts:
