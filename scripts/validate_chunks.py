@@ -78,6 +78,8 @@ def main():
     if dup:
         errs.append(f"语料库里条文号重复：{dup[:10]}")
     bad_no = [c for c in clause_ids if not RE_CLAUSE.match(c)]
+    # 附录（附录A/附录B）本来就没有 X.Y.Z 编号，属正常
+    bad_no = [c for c in bad_no if not c.startswith("附录")]
     if bad_no:
         warns.append(f"条文号格式异常（非 X.Y.Z）：{bad_no[:10]}")
 
@@ -114,7 +116,8 @@ def main():
         p = str(col(r, "父条号") or "")
         if "父块" in lv:
             parents[p] = r
-        elif "表" in lv:
+        elif "表" in lv or "附录" in lv:
+            # 附录子块（附录A（子块·聚酯）等）与表格块同类：独立信息单元，不算"款"
             tables.append(r)
             children[p].append(r)
         else:
@@ -126,6 +129,8 @@ def main():
         errs.append(f"子块找不到父块（孤儿）：{orphan[:10]}")
 
     # 悬空父条（父块不在语料库里）
+    #   附录A/附录B 在语料库页签里有对应行（章=附录），属于合法父条。
+    clause_ids = set(clause_ids) | {"附录A", "附录B"}
     dangling = [p for p in parents if p not in set(clause_ids)]
     if dangling:
         errs.append(f"父条不在语料库中：{dangling[:10]}")
@@ -179,7 +184,10 @@ def main():
         for r in corpus:
             if str(col(r, "关联表格") or "").strip():
                 refd.add(str(col(r, "条文号")))
-        lost = [str(col(t, "切片ID")) for t in tables if str(col(t, "父条号")) not in refd]
+        # 附录子块不来自「关联表格」列，属正常，按父条号排除
+        lost = [str(col(t, "切片ID")) for t in tables
+                if str(col(t, "父条号")) not in refd
+                and not str(col(t, "父条号")).startswith("附录")]
         if lost:
             warns.append(f"表格块的父条未在语料库「关联表格」里登记：{lost[:10]}")
 

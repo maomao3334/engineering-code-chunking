@@ -88,14 +88,19 @@ def main():
         print(f"     出现在 p{pdf_nos[n]}")
 
     # 2 编造
-    fake = sorted(kb - set(pdf_nos))
+    #   附录的条号（附录A/附录B）来自图片表格，PDF 文字层里抓不到编号，
+    #   属于正常，不计入"编造"。
+    fake = sorted(x for x in (kb - set(pdf_nos)) if not str(x).startswith("附录"))
     print(f"2. 编造（语料库有、PDF 无）: {fake or '无'}")
     ok &= not fake
 
     # 3 断号
+    #   附录（附录A/附录B）不是 X.Y.Z 格式，跳过断号检查
     by_ch = {}
     for n in kb:
-        p = n.split(".")
+        p = str(n).split(".")
+        if len(p) < 3 or not all(x.isdigit() for x in p):
+            continue
         by_ch.setdefault(p[0], set()).add(int(p[2]))
     gaps = []
     for ch, nums in by_ch.items():
@@ -146,7 +151,11 @@ def main():
     _ws = _wb["RAG切片"]
     n_tblslice = 0
     for _r in _ws.iter_rows(min_row=2, values_only=True):
-        if _r[2] and str(_r[2]).startswith("表（"):
+        lv = str(_r[2] or "")
+        if "父块" in lv:
+            continue                      # 父块单独计（= 语料库行数）
+        # 表格/附录子块都算作"非款子块"
+        if lv.startswith("表（") or "附录" in lv:
             n_tblslice += 1
     _wb.close()
     exp = len(rows) + n_item + n_tblslice

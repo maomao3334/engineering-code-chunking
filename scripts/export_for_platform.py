@@ -88,19 +88,28 @@ def main():
         base_name = safe_filename(f"{no}_{title}")
 
         tbl_slices = [s for s in r.table_slices if s["parent"] == no]
-        if len(text) > MAX_MD_CHARS and len(tbl_slices) > 1:
+        # 附录的子块不在 table_slices 里，而在 children 里；
+        # 它们同样需要拆成单独文件（附录A 全量 26KB，不拆会被平台切碎且丢上下文）
+        app_slices = [c for c in r.children.get(no, []) if "附录" in c["level"]]
+        split_slices = tbl_slices + app_slices
+        if len(text) > MAX_MD_CHARS and len(split_slices) > 1:
             # 条文正文单独一片
             head = r.parents[no]["text"]
             (md_dir / f"{base_name}.md").write_text(head, encoding="utf-8")
             written = [f"{base_name}.md"]
-            # 每个表格分片单独成文件，文件名带行标识
-            for i, ts in enumerate(tbl_slices, 1):
+            # 每个分片单独成文件，文件名带标识
+            for i, ts in enumerate(split_slices, 1):
                 lv = ts["level"].split("·")[-1].rstrip("）")
-                fn = safe_filename(f"{base_name}_表格{i}_{lv}") + ".md"
+                if "速查" in ts["level"]:
+                    fn = safe_filename(f"{base_name}_反向速查") + ".md"
+                elif "附录" in ts["level"]:
+                    fn = safe_filename(f"{base_name}_{lv}") + ".md"
+                else:
+                    fn = safe_filename(f"{base_name}_表格{i}_{lv}") + ".md"
                 (md_dir / fn).write_text(ts["header"] + "\n" + ts["body"],
                                         encoding="utf-8")
                 written.append(fn)
-            fname = f"{base_name}.md（+{len(tbl_slices)} 个表格分片）"
+            fname = f"{base_name}.md（+{len(split_slices)} 个分片）"
         else:
             fname = f"{base_name}.md"
             (md_dir / fname).write_text(text, encoding="utf-8")
@@ -305,7 +314,17 @@ def main():
 
 
 def _sortkey(no):
-    return tuple(int(x) for x in no.split("."))
+    """排序键：条文按 1.0.1 数字顺序；附录等非数字条号排在最后。
+
+    原来直接 int(x) 拆点号，遇到「附录A」会抛 ValueError（实测踩过）。
+    注意不能返回长度不同的 tuple（Python 比较会出错），
+    所以统一成 (0/1, 定长字符串, 原文)。
+    """
+    parts = str(no).split(".")
+    if all(p.isdigit() for p in parts):
+        # 各段补零到 6 位，保证字典序等于数值序
+        return (0, ".".join(p.zfill(6) for p in parts), str(no))
+    return (1, "", str(no))
 
 
 if __name__ == "__main__":

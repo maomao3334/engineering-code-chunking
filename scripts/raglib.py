@@ -686,18 +686,38 @@ class Retriever:
         return [x for x in dict.fromkeys(_REF.findall(p["body"])) if x != parent]
 
     def render_expanded(self, parent, with_refs=True):
-        """父块（头 + 正文 + 全部款）+ 关联表格 + 被引用的条文
+        """父块（头 + 正文 + 全部款）+ 关联表格 + 附录明细 + 被引用的条文
 
-        最后一项是优化项：规范里 17 条条文写着"除应符合第X条外"，
-        不把被引用的条带上，答案就是悬空的。
+        · 款必须带上：条文正文常只有一句"应符合下列规定"，细节全在款里。
+        · 附录/表格子块必须带上：附录父块只是摘要，118 条明细在子块里；
+          不带的话导出 md 只有 900 字，查"涤纶属于几类"根本查不到（实测踩过）。
+        · 被引用条文：规范里 17 条写"除应符合第X条外"，不带就是悬空答案。
         """
         p = self.parents.get(parent)
         if not p:
             return ""
         parts = [p["header"], p["body"]]
+
+        # 款/附录子块（都在 children 里）——只排除表格行分片
+        for k in self.children.get(parent, []):
+            if "表（" in k["level"]:
+                continue
+            parts.append(k["body"])
+
         tmd = self.table_md(parent)
         if tmd:
             parts.append(tmd)
+
+        # 附录明细 / 表格行分片 / 反向速查
+        #   注意：table_md() 已经渲染过一次表格内容；若这里再拼 table_slices，
+        #   表格会出现两遍（实测 4.1.7 的「事实（共」和「数据行」各出现 2 次）。
+        #   所以：**只有该 parent 的 table_md 为空时**才用 table_slices，
+        #   附录没有 table_md，正好走这条路。
+        if not tmd:
+            for ts in self.table_slices:
+                if ts["parent"] == parent:
+                    parts.append(ts["body"])
+
         if with_refs:
             for ref in self.refs_of(parent):
                 rp = self.parents.get(ref)
