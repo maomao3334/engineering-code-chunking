@@ -559,21 +559,40 @@ class Retriever:
             if ccols:
                 L.append("列索引（已校准）：")
                 L.append("  " + "；".join(f"列{k}={ccols[k]}" for k in sorted(ccols)))
-            L.append("数据行（视觉读图 + 逐块核对，未列出的格为「—」）：")
+
+            # 文字格：有的行不是米数，而是「1.5倍杆(塔)高度」这类表述。
+            # 必须**填回到数据行里**，否则该行显示成 | — | — | — | — | —，
+            # 读取方会误以为这一行"全部无要求"（实测踩过）。
+            # text_cells 的键形如 "col1"/"col2"，要转成真实列号。
+            tc_raw = cal.get("text_cells") or {}
+            tc_by_row = {}
+            for r, d in tc_raw.items():
+                m2 = {}
+                for kk, vv in d.items():
+                    kk2 = str(kk)
+                    if kk2.startswith("col"):
+                        kk2 = kk2[3:]
+                    try:
+                        m2[int(kk2)] = vv
+                    except ValueError:
+                        continue
+                tc_by_row[int(r)] = m2
+
+            L.append("数据行（视觉读图 + 逐块核对；"
+                     "「—」=原表无要求，非数字格按文字给出）：")
             L.append("  行标签 | " + " | ".join(str(k) for k in keys))
             for r in sorted(int(x) for x in grows):
                 vals = grows[str(r)]
+                tc = tc_by_row.get(r, {})
                 cells = []
                 for i in range(len(keys)):
-                    v = vals[i] if i < len(vals) else None
-                    cells.append(str(v) if v is not None else "—")
+                    k = keys[i]
+                    if k in tc:
+                        cells.append(str(tc[k]))       # 文字格优先
+                    else:
+                        v = vals[i] if i < len(vals) else None
+                        cells.append(str(v) if v is not None else "—")
                 L.append(f"  {rlabels.get(r, '')} | " + " | ".join(cells))
-            tc = cal.get("text_cells") or {}
-            if tc:
-                L.append("  （文字格，非数值）：")
-                for r, d in tc.items():
-                    L.append(f"    {rlabels.get(int(r), '')} | " +
-                             " | ".join(f"列{k}={v}" for k, v in d.items()))
             return "\n".join(L)
 
         # 无校准数据：回退 OCR 网格，并明确标注不可靠
