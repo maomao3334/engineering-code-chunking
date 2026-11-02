@@ -96,6 +96,30 @@ def load_slices():
     return out
 
 
+def load_facts():
+    """读「表格事实」页签 → {表号: [事实句, ...]}
+
+    人工校准列名后生成的自包含事实句。这类句子对表格问答最有效：
+    读取方不需要理解表格结构，直接读句子就能答。
+    页签不存在时返回空（老语料库兼容）。
+    """
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(XLSX, read_only=True)
+    except Exception:
+        return {}
+    if "表格事实" not in wb.sheetnames:
+        wb.close()
+        return {}
+    ws = wb["表格事实"]
+    out = defaultdict(list)
+    for r in ws.iter_rows(min_row=2, values_only=True):
+        if r[0] and r[6]:
+            out[str(r[0])].append(str(r[6]))
+    wb.close()
+    return dict(out)
+
+
 def load_tables():
     """读「表格明细」，返回 (条号->表号, 表号->{title,header,rows})
 
@@ -149,11 +173,13 @@ def load_meta():
     return meta
 
 
-def build_table_slices(meta, link, tables):
+def build_table_slices(meta, link, tables, facts=None):
     """把表格做成独立子块（切片ID: 编号::条号#表号），父条号指回条文
 
     这就是硬伤 A 的正解：表格本来在切片体系之外，检索永远捞不到。
+    含人工校准后生成的事实句 —— 那是表格能被"读懂"的关键。
     """
+    facts = facts or {}
     out = []
     for tid, tno in link.items():
         t = tables.get(tno)
@@ -162,8 +188,16 @@ def build_table_slices(meta, link, tables):
             continue
         header = (f"《{m['name']}》{m['code']}｜{m['zhang']}｜{m['jie']}｜"
                   f"第{tid}条｜{t['title'] or tno}｜表格")
-        L = ["| " + " | ".join(t["header"]) + " |",
-             "|" + "|".join(["---"] * len(t["header"])) + "|"]
+        L = []
+        fs = facts.get(tno) or []
+        if fs:
+            L.append(f"事实（共 {len(fs)} 条，可直接引用）：")
+            for s in fs:
+                L.append("  · " + s)
+            L.append(f"  ⚠ 以上事实仅限本表所列对象（{t['title']}）；"
+                     f"若问题对象不在本表范围内，请勿套用。")
+        L.append("| " + " | ".join(t["header"]) + " |")
+        L.append("|" + "|".join(["---"] * len(t["header"])) + "|")
         for row in t["rows"]:
             L.append("| " + " | ".join(x or "—" for x in row) + " |")
         body = "\n".join(L)
@@ -230,9 +264,19 @@ class Retriever:
         self.child_weight = child_weight   # 子块分数折算（款太短，太容易"局部匹配"压过正确的条）
         self.use_boost = use_boost         # 「使用期/管理类」问题的章节路由加权
         self.link, self.tables = load_tables()
+        self.facts = load_facts()      # 表号 -> [事实句]，人工校准列名后生成
         base = load_slices()
-        self.table_slices = build_table_slices(load_meta(), self.link, self.tables)
-        self.slices = base + (self.table_slices if use_table_slices else [])
+        self.table_slices = build_table_slices(load_meta(), self.link, self.tables, self.facts)
+
+        # 去重：语料库的「RAG切片」页签里**已含**表格子块（生成时写进去的），
+        # 这里又 build 一遍 → 同一 ID 出现两份，一份含事实句一份不含。
+        # 实测后果：检索有时命中旧的那份，事实句拿不到 → 表格题答不准。
+        # 处理：以 runtime 构建的 table_slices 为准（它含事实句），丢弃 base 里的表格块。
+        if use_table_slices:
+            base = [s for s in base if "表（子块" not in s["level"]]
+            self.slices = base + self.table_slices
+        else:
+            self.slices = base
         self.parents = {}          # 父条号 -> 父块 slice
         self.children = defaultdict(list)
         for s in self.slices:
@@ -303,9 +347,27 @@ class Retriever:
         return out
 
     # ---------- 拼接上下文 ----------
-    def render(self, parent):
-        """父块全文（已含章/节/条元数据头 + 全部款）"""
-        return self.parents[parent]["text"] if parent in self.parents else ""
+    def render(self, parent, with_table=True, with_refs=False):
+        """父块全文（章/节/条元数据头 + 全部款）
+
+        **必须带上关联表格**：表格是条文的一部分。
+        实测踩过：条文写"不应小于表4.1.7 的规定"，但检索只返回这一句，
+        表里的事实句/数值全拿不到 → 表格题 0/8 答对。
+        """
+        base = self.parents[parent]["text"] if parent in self.parents else ""
+        if not base:
+            return ""
+        parts = [base]
+        if with_table:
+            tm = self.table_md(parent)
+            if tm:
+                parts.append(tm)
+        if with_refs:
+            for rno in self.refs_of(parent):
+                rp = self.parents.get(rno)
+                if rp:
+                    parts.append(f"【被引用条文 {rno}】\n" + rp["text"])
+        return "\n".join(parts)
 
     def table_md(self, parent):
         """该条引用的表，渲染成「列索引 + 数据行」。
@@ -360,12 +422,26 @@ class Retriever:
         # 已在「表格质量」页签逐表标注。详见 references/pdf-to-corpus-walkthrough.md。
 
         L = [f"【{t['title'] or tno}】"]
+
+        # 事实句优先（人工校准列名后生成，读取方直接读句子即可）
+        fs = self.facts.get(tno) or []
+        if fs:
+            L.append(f"事实（共 {len(fs)} 条，可直接引用）：")
+            for s in fs:
+                L.append("  · " + s)
+            # 防止误用：事实句只适用于**本表对象**。
+            # 实测踩过：问"生产厂房与厂内主要道路"时，检索把堆场表(4.2.9)的
+            # 事实句给了 AI，用户会误以为那就是答案。
+            L.append(f"  ⚠ 以上事实仅限本表所列对象（{t['title']}）；"
+                     f"若问题对象不在本表范围内，请勿套用，应另查其他表或说明查不到。")
+
         named = [(i + 1, c) for i, c in enumerate(cols) if c]
         if named:
             L.append("列索引（数据行按此列序对齐）：")
             L.append("  " + "；".join(f"列{i}={c}" for i, c in named))
 
         body = grid[data_start:] if data_start < len(grid) else grid
+        L.append("原始数据行：")
         for row in body:
             cells = [str(x or "—") for x in row[:ncol]]
             cells += ["—"] * (ncol - len(cells))
