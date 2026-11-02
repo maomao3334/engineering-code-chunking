@@ -40,6 +40,21 @@ def safe_name(s):
     return re.sub(r'[\\/:*?"<>|\s]+', "_", s).strip("_")
 
 
+def safe_filename(s):
+    """整条文件名统一处理：空格→下划线，连续下划线折叠，去首尾。
+
+    为什么要整条处理而不是只处理 title：
+        原来是 f"{no} {safe_name(title)}"，no 后固定一个空格，
+        拼分片时又加 " 表格1"，产生**连续空格**（如 "4.2.10  表格1_r0.md"）。
+        实测 10 个文件受影响；部分平台导入时会把连续空格规范化，
+        导致文件名与语料库记录不一致，回溯困难。
+    """
+    s = re.sub(r'[\\/:*?"<>|]+', "_", s)
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"_+", "_", s)
+    return s.strip("_")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(HERE / "导出"),
@@ -70,7 +85,7 @@ def main():
     for no, p in sorted(r.parents.items(), key=lambda kv: _sortkey(kv[0])):
         text = r.render_expanded(no)          # 含所有款 + 关联表 + 被引用条
         title = p["title"] or ""
-        base_name = f"{no} {safe_name(title)}"
+        base_name = safe_filename(f"{no}_{title}")
 
         tbl_slices = [s for s in r.table_slices if s["parent"] == no]
         if len(text) > MAX_MD_CHARS and len(tbl_slices) > 1:
@@ -81,7 +96,7 @@ def main():
             # 每个表格分片单独成文件，文件名带行标识
             for i, ts in enumerate(tbl_slices, 1):
                 lv = ts["level"].split("·")[-1].rstrip("）")
-                fn = f"{base_name} 表格{i}_{safe_name(lv)}.md"
+                fn = safe_filename(f"{base_name}_表格{i}_{lv}") + ".md"
                 (md_dir / fn).write_text(ts["header"] + "\n" + ts["body"],
                                         encoding="utf-8")
                 written.append(fn)
@@ -103,11 +118,18 @@ def main():
         })
 
     # ---------- 2. 单文件，按二级标题分段 ----------
+    #     标题/编号/条数一律从语料库实际内容生成，不硬编码（原来写死 GB55037 / 241 条）
+    _h0 = next(iter(sorted(r.parents.values(), key=lambda p: _sortkey(p["parent"]))), None)
+    _parts0 = _h0["header"].split("｜") if _h0 else []
+    _spec = _parts0[0] if _parts0 else "条文库"
+    _n_mand = sum(1 for p in r.parents.values() if "强制性条文" in p["header"])
+    _mand_note = ("全部条文为强制性条文。" if _n_mand == len(r.parents)
+                  else f"其中强制性条文 {_n_mand} 条。")
     lines = [
-        "# 建筑防火通用规范 GB 55037-2022",
+        f"# {_spec}",
         "",
-        "> 依据 GB 55037-2022 整理的条文库。全部条文为强制性条文。",
-        "> 共 241 条，按「章—节—条」组织。每条下含全部款与关联表格。",
+        f"> 依据 {_spec} 整理的条文库。{_mand_note}",
+        f"> 共 {len(r.parents)} 条，按「章—节—条」组织。每条下含全部款与关联表格。",
         "",
     ]
     cur_ch = None
@@ -129,21 +151,31 @@ def main():
     (txt_dir / "全库.md").write_text("\n".join(lines), encoding="utf-8")
 
     # ---------- 3. JSON ----------
+    # 规范编号从语料库实际读取，不能硬编码（原来写死 GB55037-2022，
+    # 换成纺织规范后 JSON 里的编号全是错的）。
+    code_of = {}
+    for no, p in r.parents.items():
+        parts = p["header"].split("｜")
+        code_of[no] = parts[0].split("》")[-1].strip() if "》" in parts[0] else ""
+    spec_code = next((v for v in code_of.values() if v), "UNKNOWN")
+
     slices = []
     for no, p in sorted(r.parents.items(), key=lambda kv: _sortkey(kv[0])):
+        parts = p["header"].split("｜")
         slices.append({
-            "id": f"GB55037-2022::{no}",
+            "id": f"{spec_code.replace(' ', '')}::{no}",
             "parent": no,
             "level": "条",
             "title": p["title"],
             "text": r.render_expanded(no),
             "metadata": {
-                "规范编号": "GB 55037-2022",
-                "章": p["header"].split("｜")[1] if "｜" in p["header"] else "",
-                "节": p["header"].split("｜")[2] if p["header"].count("｜") >= 2 else "",
+                "规范编号": spec_code,
+                "章": parts[1] if len(parts) > 1 else "",
+                "节": parts[2] if len(parts) > 2 else "",
                 "条号": no,
                 "小标题": p["title"],
-                "是否强条": "是",
+                # 强条依据语料库实际字段，原来统一写「是」是错的
+                "是否强条": "是" if "强制性条文" in p["header"] else "否",
             },
         })
     for no, kids in r.children.items():
@@ -153,9 +185,17 @@ def main():
             slices.append({
                 "id": c["id"], "parent": no, "level": "款",
                 "title": c["title"], "text": c["text"],
-                "metadata": {"规范编号": "GB 55037-2022", "条号": no,
+                "metadata": {"规范编号": spec_code, "条号": no,
                              "层级": c["level"]},
             })
+    # 表格切片必须一起导出（原来漏了，导致 JSON 导入方式拿不到表格）
+    for ts in r.table_slices:
+        slices.append({
+            "id": ts["id"], "parent": ts["parent"], "level": "表",
+            "title": ts["title"], "text": ts["text"],
+            "metadata": {"规范编号": spec_code, "条号": ts["parent"],
+                         "层级": ts["level"]},
+        })
     (json_dir / "slices.json").write_text(
         json.dumps(slices, ensure_ascii=False, indent=1), encoding="utf-8")
 
@@ -173,15 +213,25 @@ def main():
         json.dumps(fastgpt, ensure_ascii=False, indent=1), encoding="utf-8")
 
     # ---------- 说明 ----------
+    from raglib import XLSX as _XLSX
+    XLSX_NAME = Path(_XLSX).name
+    _fp = next(iter(sorted(r.parents.items(), key=lambda kv: _sortkey(kv[0]))), None)
+    _first_parent_header = _fp[1]["header"] if _fp else ""
+    md_files = sorted(md_dir.glob("*.md"))
+    md_lens = [len(p.read_text(encoding="utf-8")) for p in md_files]
+    avg_len = sum(md_lens) // max(len(md_lens), 1)
+    max_len = max(md_lens) if md_lens else 0
+    n_tbl = sum(1 for s in single if s["有表格"])
+    src_name = XLSX_NAME
     readme = f"""# 语料库导出包
 
-由 `export/export_for_platform.py` 生成，源语料库：`{Path(r.__class__.__module__).name if False else 'v5'}`
+由 `export/export_for_platform.py` 生成，源语料库：`{src_name}`
 
 ## 目录
 
 | 目录 | 内容 | 数量 |
 |---|---|---|
-| `markdown/` | 一条条文一个 .md 文件 | {len(single)} 个 |
+| `markdown/` | 一条条文一个 .md 文件（大表按行拆分为多个） | {len(md_files)} 个 |
 | `分段文本/全库.md` | 单文件，`## 第X条` 分隔 | 1 个 |
 | `json/slices.json` | 结构化切片（父块+子块+元数据） | {len(slices)} 条 |
 | `json/fastgpt_pushdata.json` | FastGPT pushData 格式 | {len(fastgpt)} 条 |
@@ -190,15 +240,16 @@ def main():
 
 ### 方式 A：上传 markdown 文件夹（最通用）
 
-几乎所有 RAG 平台都支持上传 .md 或 .txt 文件。把 `markdown/` 目录下的
-{len(single)} 个文件全部上传即可。
+把 `markdown/` 目录下的 **{len(md_files)}** 个文件全部上传。
 
-**为什么这样能保持切片完整**：每个文件只有约 175 字（最长 912 字），
-小于平台默认的分段长度（通常 500~1000 字）。所以平台分段之后，
-**一个文件恰好等于一个 chunk**，我们的父子结构被完整保留。
+**切块设置建议**：单个文件中位 {avg_len} 字、最长 {max_len} 字。
+平台默认分段长度通常 500~1000 字，建议设为 **≥ {max_len}** 或按标题分段，
+这样「一个文件 = 一个 chunk」，父子结构不被切碎。
 
-适用：RAGFlow、MaxKB、AnythingLLM、FastGPT、Dify、Cherry Studio、WeKnora 等，
-以及任何支持"上传文件建知识库"的工具。
+> 带大表的条文（如 4.2.10）已按行拆成多个文件，
+> 每个分片都带表号前缀（如 `【表4.2.10】`），切块后仍能自证身份。
+
+适用：Cherry Studio、RAGFlow、MaxKB、AnythingLLM、FastGPT、Dify、WeKnora 等。
 
 ### 方式 B：单文件
 
@@ -216,17 +267,24 @@ def main():
 每个文件的结构：
 
 ```
-《建筑防火通用规范》GB 55037-2022｜7 安全疏散与避难设施｜7.4 公共建筑｜第7.4.1条｜公共建筑安全出口与疏散楼梯｜强制性条文
+《{_first_parent_header}》
 （条文正文，含全部款）
-【表7.4.1 …】
-（表格，Markdown 格式）
+【表X.Y.Z …】
+事实（共 N 条，可直接引用）：
+  · 【表X.Y.Z】对象A 与「对象B」的防火间距不应小于 25m。
+列索引（已校准）：
+  列1=…；列2=…
+数据行（视觉读图 + 逐块核对）：
+  行标签 | 1 | 2 | …
 ```
 
 第一行是元数据头，**这一行是溯源的关键** —— 模型读到它才知道自己在引用哪一条。
 
 ## 校验
 
-导出后可用于核对：条号总数应为 241，带表格的应为 4 条。
+- 条文总数：**{len(single)}** 条
+- 带表格的条文：**{n_tbl}** 条
+- markdown 文件：**{len(md_files)}** 个（含大表的行分片）
 """
     (out / "README.md").write_text(readme, encoding="utf-8")
 
