@@ -260,8 +260,10 @@ def build_table_slices(meta, link, tables, facts=None, calibrated=None):
             for r, rowitems in byrow.items():
                 lab = next((x[1] for x in rowitems if x[1]), "")
                 hdr = f"{base_hdr}#r{r}｜{lab}"
+                _cc = [v for v in (cal.get("cols") or {}).values() if v]
+                _last = _cc[-1] if _cc else ""
                 LL = [f"本片为「{t['title'] or tno}」中「{lab}」这一行；"
-                      f"下表每条均为：本行对象 与 该列对象 之间的防火间距（单位 m）。"]
+                      f"下表每条为：本行对象 对应的「{_last}」。"]
                 for txt, _ in rowitems:
                     LL.append("  · " + txt)
                 LL.append(f"  ⚠ 以上事实仅限本表所列对象（{t['title']}）；"
@@ -340,8 +342,16 @@ def build_table_slices(meta, link, tables, facts=None, calibrated=None):
         header = base_hdr
         L = []
         if fs:
+            # 表义说明：**不能硬编码"防火间距（单位 m）"**。
+            # 实测踩过：GB55037 的表10.1.4 是"连续供电时间（h）"、
+            # 表10.1.5 是"设计火灾延续时间（h）"，写成防火间距会误导模型。
+            # 也不能取"最后列名"：表7.4.7 有 5 个并列列（一二级/三级/四级），
+            # 取最后列会写成"四级（m/100人）"，以偏概全。
+            # 正确做法：用表标题本身作为表义说明。
+            _meaning = str(t.get("title") or "").strip()
             L.append(f"本片为「{t['title'] or tno}」全表；"
-                     f"下表每条均为：行对象 与 列对象 之间的防火间距（单位 m）。")
+                     f"下表每条为该行对象对应的规定值。"
+                     + (f"（表义：{_meaning}）" if _meaning else ""))
             L.append(f"事实（共 {len(fs)} 条，可直接引用）：")
             for s in fs:
                 txt = s.get("text", "") if isinstance(s, dict) else str(s)
