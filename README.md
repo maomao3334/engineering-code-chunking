@@ -40,7 +40,7 @@ references/
   chunk-schema.md                         语料库表结构（8 个页签、列定义）
   edge-cases.md                           边界情况（跨页条、款号缺失、表格跨页…）
   prompt-engineering.md                   切分提示词工程（为批量切 200 部准备）
-  quality-gates.md                        质检门（6 类结构检查）
+  quality-gates.md                        质检门（结构/内容/检索/人工复审四关）
   evaluation.md                           检索评测方法
   export-and-deploy.md                    导出到平台 / 免安装打包
   multi-standard-and-acceptance.md       并第二部规范 + 20 题验收自动跑分
@@ -51,6 +51,10 @@ scripts/
   scan_defects.py                         12 类 OCR 字符缺陷扫描
   fix_defects.py                          自动修复
   compare_chunking.py                     四种切分策略对比实验
+  verify_delivery.py                      交付前一键验收（串起四关，汇总四项指标）
+  lint_schema.py                          schema 体检（页签/列/表格来源标注/质检报告占位）
+  build_review_workbench.py               生成人工复审工作台（按不确定度降序排队列，含 md 文件+行号）
+  collect_review_results.py               回收复审结果 → overrides.json + 汇总报告
   export_for_platform.py                  导出 markdown/json/分段文本
   diagnose_misses.py                      诊断"为什么没命中"（排名/分数/token 交集）
   list_principle_clauses.py               列出原则/引述条款（检索降权依据）
@@ -93,7 +97,18 @@ python scripts/list_principle_clauses.py --rag ./rag  # 该降权的条款清单
 
 ## 版本
 
-- **v1.7.6**（当前）：补全 29 个脚本索引（原来只写了 11 个）；清 2 处格式残留
+- **v1.9.0**（当前）：**把 12 条待办全部落地**。新增 `verify_delivery.py`（一条命令跑完四关）、
+  `lint_schema.py`（页签/列/「表格明细.来源」契约体检，缺列即失败）、`collect_review_results.py`
+  （复审回填 → `overrides.json` 闭环）；`validate_chunks.py` 增「父块含全部款」「款正文洁净度」
+  「公式占位↔公式明细」三条断言与 `--allow-suffix`；`scan_defects.py` 增例外字典与默认跳过说明性页签、
+  支持 `--json`；`crosscheck_corpus.py` 修 A/B 后缀条被误判编造、附录误判断截断、含公式条文抽样必失败，
+  增 `--allow` 已知项；`raglib.py` 表格/切片/元信息读取全部改按列名取值（修 `invalid literal for int()` 崩溃）；
+  工作台增 `--only/--kind/--manifest`；`edge-cases.md` 补「附录整册 vs 附录条款」「A/B 后缀条」。
+- v1.8.0：交付检查从三步变四步——新增 `build_review_workbench.py` 生成「人工复审工作台」，
+  把待判对象按**不确定度降序**排队（图片表格转录/公式还原/原书矛盾/几何识别的下划线排最前），
+  带打分依据与 P0-P3 优先级，并给出导出 md 的文件+行号；schema 增补「页级元素」页签、
+  表格明细「来源/交叉校验」两列、语料库「关联附录/引用条文/小标题来源」三列、修订标记按段拆分。
+- v1.7.6：补全 29 个脚本索引（原来只写了 11 个）；清 2 处格式残留
 - v1.7.5：补完整依赖清单；raglib 改为按当前工作目录找语料库（原来只搜 skill 目录，跨工程使用时静默拿到空数据）
 - v1.7.4：6 个脚本补参数守卫（--help 不再误执行、缺参 exit=2），修「误调用会覆盖校准数据」
 - v1.7.3：修表义说明硬编码「防火间距（单位m）」——GB55037 的表是供电时间/火灾延续时间，写成间距会误导模型

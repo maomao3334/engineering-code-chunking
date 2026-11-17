@@ -5,6 +5,7 @@
 用法：
     python validate_chunks.py <语料库.xlsx>
     python validate_chunks.py <语料库.xlsx> --sheet RAG切片 --corpus 语料库
+    python validate_chunks.py <语料库.xlsx> --allow-suffix "A,B" --kuan 列项明细
 
 检查项（任一失败即非零退出）：
     1. 切片 ID 唯一
@@ -13,6 +14,9 @@
     4. 每个切片全文首行含元数据头（用 ｜ 分隔）
     5. 条文号在语料库里存在（悬空父条检查）
     6. 表格块能被某个条文引用
+    7. 【新增】父块正文必须含该条全部款（铁律 1 的落地校验）
+    8. 【新增】款正文洁净度：款不得以 图/表/注/附图/附表 开头（页级元素污染检查）
+    9. 【新增】公式占位与「公式明细」一一对应
 
 只依赖 openpyxl。不修改输入文件。
 """
@@ -28,6 +32,14 @@ except ImportError:
 
 HEADER_SEP = "｜"
 RE_CLAUSE = re.compile(r"^\d+\.\d+\.\d+$")
+RE_CLAUSE_SUFFIX = re.compile(r"^(\d+\.\d+\.\d+)([A-Z])$")
+# 附录内的条款号（附录G 的 G.0.1）与「附加说明」不是 X.Y.Z 形式，属合法形态
+RE_APPX_CLAUSE = re.compile(r"^[A-J]\.\d+\.\d+$")
+NON_CLAUSE_LABELS = {"附加说明", "条文说明"}
+# 款正文里不该出现的"行首"内容（页级元素应单列，不得折进款）
+RE_PAGELEVEL_LINE = re.compile(r"^\s*(?:图\s*\d+\.\d+\.\d+|表\s*\d+\.\d+\.\d+|附图\s*[A-Z]|附表\s*[A-Z]|注\s*[：:])")
+RE_FORMULA_PH = re.compile(r"〔公式\s*[（(]([^）)]+)[）)]\s*〕")
+
 
 
 def load(wb, sheet):
@@ -60,8 +72,12 @@ def main():
     ap.add_argument("xlsx")
     ap.add_argument("--sheet", default="RAG切片")
     ap.add_argument("--corpus", default="语料库")
+    ap.add_argument("--kuan", default="列项明细", help="款级页签名（无此页签则跳过款相关检查）")
+    ap.add_argument("--allow-suffix", default="A,B",
+                    help="允许的条号后缀（局部修订新增条，如 1.0.5A）。默认 A,B；传空串关闭")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args()
+    allow_suffix = {s.strip().upper() for s in (a.allow_suffix or "").split(",") if s.strip()}
 
     wb = openpyxl.load_workbook(a.xlsx, read_only=True, data_only=True)
     errs, warns = [], []
@@ -77,9 +93,19 @@ def main():
     dup = [k for k, v in Counter(clause_ids).items() if v > 1]
     if dup:
         errs.append(f"语料库里条文号重复：{dup[:10]}")
-    bad_no = [c for c in clause_ids if not RE_CLAUSE.match(c)]
-    # 附录（附录A/附录B）本来就没有 X.Y.Z 编号，属正常
-    bad_no = [c for c in bad_no if not c.startswith("附录")]
+    bad_no, suffix_hit = [], []
+    for c in clause_ids:
+        if RE_CLAUSE.match(c) or c.startswith("附录") or RE_APPX_CLAUSE.match(c) \
+                or c in NON_CLAUSE_LABELS:
+            continue
+        m = RE_CLAUSE_SUFFIX.match(c)
+        if m:
+            if m.group(2).upper() in allow_suffix:
+                suffix_hit.append(c)
+                continue
+            bad_no.append(c)
+        else:
+            bad_no.append(c)
     if bad_no:
         warns.append(f"条文号格式异常（非 X.Y.Z）：{bad_no[:10]}")
 
@@ -191,12 +217,77 @@ def main():
         if lost:
             warns.append(f"表格块的父条未在语料库「关联表格」里登记：{lost[:10]}")
 
+    # ---- 7/8. 款相关：款正文洁净度 + 父块含全部款（铁律 1）
+    kuan_rows = []
+    if a.kuan and a.kuan in wb.sheetnames:
+        khead, kuan_rows = load(wb, a.kuan)
+    dirty, lost_kuan = [], []
+    if kuan_rows:
+        if not has_col(khead, "条号") or not has_col(khead, "该层正文"):
+            warns.append(f"「{a.kuan}」缺「条号」或「该层正文」列，跳过款检查")
+        else:
+            body_by_no = {}
+            for r in corpus:
+                no = str(col(r, "条文号"))
+                body_by_no[no] = re.sub(r"\s+", "", str(col(r, "条文原文本体") or ""))
+            for k in kuan_rows:
+                no = str(col(k, "条号"))
+                kno = str(col(k, "列项路径") or col(k, "款号") or "")
+                ktext = str(col(k, "该层正文") or "")
+                # 8. 款正文不得以页级元素开头（图题/表题/注）
+                for ln in ktext.split("\n"):
+                    if RE_PAGELEVEL_LINE.match(ln):
+                        dirty.append(f"{no} 款{kno}: {ln.strip()[:26]}")
+                        break
+                # 7. 父块正文必须含该款（款号 + 内容片段）
+                body = body_by_no.get(no)
+                if body is None:
+                    lost_kuan.append(f"{no}: 语料库里没有这一条")
+                    continue
+                if kno and re.sub(r"\s+", "", kno) not in body:
+                    lost_kuan.append(f"{no}: 父块正文缺款号 {kno}")
+                elif ktext and re.sub(r"\s+", "", ktext)[:12] not in body:
+                    lost_kuan.append(f"{no}: 父块正文缺款 {kno} 的正文")
+    if dirty:
+        errs.append(f"款正文混入页级元素（图题/表题/表注应单列，不得折进款）{len(dirty)} 处："
+                    + "; ".join(dirty[:6]))
+    if lost_kuan:
+        errs.append(f"父块正文未含全部款（铁律 1 失败）{len(lost_kuan)} 处："
+                    + "; ".join(lost_kuan[:6]))
+
+    # ---- 9. 公式占位 ↔「公式明细」一一对应
+    n_ph = n_detail = 0
+    if "公式明细" in wb.sheetnames:
+        fhead, frows = load(wb, "公式明细")
+        if has_col(fhead, "公式编号"):
+            def norm(s):
+                return re.sub(r"[\s（）()]", "", str(s or ""))
+            detail = Counter(norm(col(f, "公式编号")) for f in frows if norm(col(f, "公式编号")))
+            ph = Counter()
+            for r in corpus:
+                for m in RE_FORMULA_PH.finditer(str(col(r, "条文原文本体") or "")):
+                    ph[norm(m.group(1))] += 1
+            n_ph, n_detail = sum(ph.values()), sum(detail.values())
+            orphan_ph = [k for k in ph if k not in detail]
+            if orphan_ph:
+                errs.append(f"正文有公式占位但「公式明细」里没有对应行：{orphan_ph[:8]}")
+            only_detail = [k for k in detail if k not in ph]
+            if only_detail:
+                warns.append(f"「公式明细」有登记但正文无占位（可能公式在表格/附录里，需确认）：{only_detail[:8]}")
+            if ph != detail:
+                warns.append(f"公式占位与明细条数不一致：占位 {n_ph} / 明细 {n_detail}")
+
     # ---- 报告 ----
     print(f"文件：{a.xlsx}")
-    print(f"语料库：{len(corpus)} 条")
+    print(f"语料库：{len(corpus)} 条" +
+          (f"（其中 A/B 后缀新增条 {len(suffix_hit)} 个，已按 --allow-suffix 放行）" if suffix_hit else ""))
     print(f"切片：{len(slices)} = 父块 {len(parents)} + 子块 {len(slices) - len(parents)}"
           f"（其中表格块 {len(tables)}）")
     print(f"有款的父条：{len(children)}")
+    if kuan_rows:
+        print(f"款检查：{len(kuan_rows)} 款｜款正文污染 {len(dirty)} 处｜父块缺款 {len(lost_kuan)} 处")
+    if n_ph or n_detail:
+        print(f"公式占位：正文 {n_ph} 个 ｜「公式明细」{n_detail} 行")
     print()
 
     for w in warns:

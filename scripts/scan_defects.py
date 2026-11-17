@@ -85,6 +85,29 @@ RULES = [
      "人工抽核"),
 ]
 
+# 例外字典：命中正则后再看 ±20 字窗口，若匹配下列模式则判为"不是缺陷"。
+# 为什么要这个：D03 把「B₁→B1」当下标丢失，但图例/位置标注（喷头布置位置 B1、B2）
+# 原文本来就用正体字母，属系统性误报——实测一部规范报 6 处 100% 是误报，
+# 假警报多了就没人看报告了。D04 同理（「无附录 I」里的 I 是附录代号）。
+EXEMPT = {
+    "D03": [
+        # 位置标注/图例：**两侧都要有标注语境**才豁免，避免把「B1、B2 级材料」这种真缺陷放过
+        re.compile(r"(?:喷头|测点|节点|探点|图例|布置位置|瞄准点|标注)"
+                   r"[^。；\n]{0,30}[AB][12]\s*[、,，/—\-–~（(]"),
+        re.compile(r"[AB][12]\s*[、,，/—\-–~]?[AB]?[12]?"
+                   r"[^。；\n]{0,24}(?:喷头|测点|节点|图例|布置位置|瞄准点|标注)"),
+        re.compile(r"[（(][AB][12][）)]\s*(?:点|位置|测点)"),
+    ],
+    "D04": [
+        re.compile(r"附录\s*[IVX]\b"),                        # 「无附录 I」＝附录代号
+        re.compile(r"[「『][IVX]{1,3}[」』]"),                  # 引号里的代号
+        re.compile(r"(?:无|没有|未设)\s*(?:附录)?\s*[IVX]\b"),
+    ],
+}
+
+# 这些页签是我们自己写的说明文字，不是规范正文；默认不扫（否则会把解释性文字当缺陷）
+META_SHEETS = {"质检报告", "字段说明", "前置文件", "公式明细", "图表清单", "修订标记", "页级元素"}
+
 
 def check_parens(text):
     pairs = [("（", "）"), ("(", ")"), ("《", "》"), ("【", "】")]
@@ -96,14 +119,27 @@ def check_parens(text):
 
 
 def main():
-    xlsx = sys.argv[1] if len(sys.argv) > 1 else str(
+    import argparse
+    ap = argparse.ArgumentParser(description="扫描语料库字符级缺陷（12 类）")
+    ap.add_argument("xlsx", nargs="?", default="", help="语料库工作簿")
+    ap.add_argument("--out", default="", help=f"报告输出路径（默认 {OUT}）")
+    ap.add_argument("--include-meta", action="store_true",
+                    help="连质检报告/字段说明等说明性页签一起扫（默认跳过）")
+    ap.add_argument("--skip-sheets", default="", help="额外跳过的页签，逗号分隔")
+    ap.add_argument("--json", dest="json_out", default="", help="同时输出机器可读 JSON")
+    a = ap.parse_args()
+    xlsx = a.xlsx or str(
         max(ROOT.glob("*语料库_v*.xlsx"), key=lambda p: int(re.search(r"_v(\d+)", p.name).group(1))))
+    skip = set() if a.include_meta else set(META_SHEETS)
+    skip |= {s.strip() for s in a.skip_sheets.split(",") if s.strip()}
 
     wb = openpyxl.load_workbook(xlsx, read_only=True, data_only=True)
     print(f"扫描：{Path(xlsx).name}\n")
 
     findings = []            # (规则, 工作表, 位置, 片段, 上下文, 条号)
     for ws in wb.worksheets:
+        if ws.title in skip:
+            continue
         rows = list(ws.iter_rows(values_only=True))
         if not rows:
             continue
@@ -125,6 +161,9 @@ def main():
                     for m in rx.finditer(val):
                         s = max(0, m.start() - 18)
                         ctx = val[s:m.end() + 18].replace("\n", " ")
+                        win = val[max(0, m.start() - 20): m.end() + 20]
+                        if any(p.search(win) for p in EXEMPT.get(rid, [])):
+                            continue          # 系统性误报，跳过
                         findings.append(dict(rule=rid, sheet=ws.title, where=f"行{ri}",
                                              clause=clause, hit=m.group(),
                                              ctx=ctx, sev=sev))
@@ -220,10 +259,31 @@ def main():
     A("")
     A("所以：**语料库交付前必须跑一遍自动扫描**，把它当成和 `validate_chunks.py` 同级的必做步骤。")
 
-    OUT.write_text("\n".join(L), encoding="utf-8")
+    out_path = Path(a.out) if a.out else OUT
+    out_path.write_text("\n".join(L), encoding="utf-8")
     print("\n".join(L[:34]))
-    print(f"\n报告：{OUT}")
+    print(f"\n报告：{out_path}")
+
+    if a.json_out:
+        import json
+        payload = dict(
+            xlsx=str(Path(xlsx).name),
+            rules=len(RULES),
+            skipped_sheets=sorted(skip),
+            total=len(uniq),
+            by_rule={rid: len(v) for rid, v in by_rule.items()},
+            high=[{k: f[k] for k in ("rule", "sheet", "where", "clause", "hit", "ctx")}
+                  for f in high],
+            items=[{k: f[k] for k in ("rule", "sheet", "where", "clause", "hit", "ctx", "sev")}
+                   for f in uniq],
+        )
+        Path(a.json_out).write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                                    encoding="utf-8")
+        print(f"JSON：{a.json_out}")
+
+    # 有高严重度命中 → 非零退出，便于接进 verify_delivery / CI
+    return 1 if [f for f in uniq if f["sev"] == "高"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

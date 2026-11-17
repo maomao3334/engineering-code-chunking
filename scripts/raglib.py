@@ -93,13 +93,30 @@ def tokenize(s: str):
 
 
 def load_slices():
-    """读 RAG切片 页，拆出元数据头 / 正文"""
+    """读 RAG切片 页，拆出元数据头 / 正文（按列名取，缺列时回退旧列序）"""
     import openpyxl
     wb = openpyxl.load_workbook(XLSX, read_only=True)
     ws = wb["RAG切片"]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return []
+    head = [str(x or "").strip() for x in rows[0]]
+    i_id = _idx(head, "切片ID", default=0)
+    i_pa = _idx(head, "父条号", default=1)
+    i_lv = _idx(head, "切片层级", default=2)
+    i_ti = _idx(head, "切片标题", default=3)
+    i_tx = _idx(head, "切片全文", default=4)
+    i_ch = _idx(head, "正文字符数", default=5)
+    i_p1 = _idx(head, "PDF起页", default=7)
+    i_p2 = _idx(head, "PDF末页", default=8)
+
+    def get(r, i):
+        return r[i] if (i is not None and i < len(r)) else None
+
     out = []
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        sid, parent, level, title, text = r[0], r[1], r[2], r[3], r[4]
+    for r in rows[1:]:
+        sid, text = get(r, i_id), get(r, i_tx)
         if not sid or not text:
             continue
         text = str(text)
@@ -108,9 +125,10 @@ def load_slices():
         else:
             header, body = text, ""
         out.append(dict(
-            id=str(sid), parent=str(parent), level=str(level), title=str(title or ""),
+            id=str(sid), parent=str(get(r, i_pa) or ""), level=str(get(r, i_lv) or ""),
+            title=str(get(r, i_ti) or ""),
             text=text, header=header, body=body,
-            chars=r[5] or 0, page_from=r[7], page_to=r[8],
+            chars=get(r, i_ch) or 0, page_from=get(r, i_p1), page_to=get(r, i_p2),
         ))
     return out
 
@@ -146,11 +164,19 @@ def load_facts(structured=False):
         wb.close()
         return {}
     ws = wb["表格事实"]
-    out = defaultdict(list)
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        if r[0] and r[6]:
-            out[str(r[0])].append(str(r[6]))
+    rows = list(ws.iter_rows(values_only=True))
     wb.close()
+    if not rows:
+        return {}
+    head = [str(x or "").strip() for x in rows[0]]
+    i_tno = _idx(head, "表号", default=0)
+    i_fact = _idx(head, "事实句", "事实", default=6)
+    out = defaultdict(list)
+    for r in rows[1:]:
+        tno = r[i_tno] if i_tno is not None and i_tno < len(r) else None
+        fact = r[i_fact] if i_fact is not None and i_fact < len(r) else None
+        if tno and fact:
+            out[str(tno)].append(str(fact))
     return dict(out)
 
 
@@ -172,56 +198,115 @@ def load_calibrated():
         return {}
 
 
+def _idx(head, *names, default=None):
+    """按列名找下标（容忍表头带括号说明）。找不到返回 default。
+
+    为什么必须按名取值：不同规范的列数/列序不一样（有的是 8 列、有的是 12 列），
+    写死 r[5] 这种下标，换个语料库就把「列标题」当「列序号」去 int()，
+    实测直接崩：ValueError: invalid literal for int() with base 10: '可燃物'。
+    """
+    for n in names:
+        if n in head:
+            return head.index(n)
+        for i, h in enumerate(head):
+            if h.startswith(n):
+                return i
+    return default
+
+
 def load_tables():
-    """读「表格明细」，返回 (条号->表号, 表号->{title,header,rows})
+    """读「表格明细」+「语料库」的关联表号，返回 (条号->表号, 表号->{title,header,rows})
 
     表在 v2 库里是"孤岛"：只存在「表格明细」页签，没有进切片。
-    这里把它读出来，好挂回父块上下文。
+    这里把它读出来，好挂回父块上下文。**全部按列名取值，不依赖列序。**
     """
     import openpyxl
     wb = openpyxl.load_workbook(XLSX, read_only=True)
+
     ws = wb["语料库"]
+    rows = list(ws.iter_rows(values_only=True))
+    chead = [str(x or "").strip() for x in (rows[0] if rows else [])]
+    i_no = _idx(chead, "条文号", default=4)
+    i_tab = _idx(chead, "关联表格")          # 只认「关联表格」，别再误取「关联附录」
     link = {}
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        if r[14]:
-            link[str(r[4])] = str(r[14])
+    if i_tab is not None:
+        for r in rows[1:]:
+            if len(r) > max(i_no, i_tab) and r[i_tab]:
+                link[str(r[i_no])] = str(r[i_tab])
 
     ws = wb["表格明细"]
+    rows = list(ws.iter_rows(values_only=True))
+    thead = [str(x or "").strip() for x in (rows[0] if rows else [])]
+    i_tno = _idx(thead, "表号", default=0)
+    i_ttl = _idx(thead, "表标题", default=1)
+    i_row = _idx(thead, "行号", default=3)
+    i_col = _idx(thead, "列序号", default=4)
+    i_head = _idx(thead, "列标题", default=5)
+    i_val = _idx(thead, "单元格值", default=6)
+    if None in (i_tno, i_row, i_col, i_val):
+        raise ValueError(f"「表格明细」缺必需列（表号/行号/列序号/单元格值）：{thead}")
+
     cells = defaultdict(list)          # 表号 -> [(行号, 列序号, 列标题, 值)]
     title = {}
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        tno = str(r[0])
-        title[tno] = str(r[1] or "")
-        cells[tno].append((int(r[4]), int(r[5]), str(r[6] or ""), str(r[7] or "")))
+    for r in rows[1:]:
+        def get(i):
+            return r[i] if (i is not None and i < len(r)) else None
+        if get(i_tno) is None:
+            continue
+        tno = str(get(i_tno))
+        title[tno] = str(get(i_ttl) or "")
+        try:
+            rn = int(float(get(i_row) or 0))
+            cn = int(float(get(i_col) or 0))
+        except (TypeError, ValueError):
+            continue
+        cells[tno].append((rn, cn, str(get(i_head) or ""), str(get(i_val) or "")))
+    wb.close()
 
     tables = {}
     for tno, cs in cells.items():
         heads = {}
-        rows = defaultdict(dict)
+        rows_ = defaultdict(dict)
         for rn, cn, head, val in cs:
             heads.setdefault(cn, head)
-            rows[rn][cn] = val
+            rows_[rn][cn] = val
         ncol = max(heads) if heads else 0
-        # 表头就是第 1 行（OCR 认定的表头行）；数据从第 2 行起，
-        # 否则表头会被打印两次（一次作 header，一次作数据行）
-        first = min(rows) if rows else 1
-        header = [rows[first].get(i, heads.get(i, f"列{i}"))
+        # 表头就是第 1 行；数据从第 2 行起，否则表头会被打印两次
+        first = min(rows_) if rows_ else 1
+        header = [rows_[first].get(i, heads.get(i, f"列{i}")) or heads.get(i, f"列{i}")
                   for i in range(1, ncol + 1)]
-        body = [[rows[rn].get(i, "") for i in range(1, ncol + 1)]
-                for rn in sorted(rows) if rn != first]
+        body = [[rows_[rn].get(i, "") for i in range(1, ncol + 1)]
+                for rn in sorted(rows_) if rn != first]
         tables[tno] = dict(title=title.get(tno, ""), header=header, rows=body)
     return link, tables
 
 
 def load_meta():
-    """条号 -> 规范全称/编号/章/节/小标题"""
+    """条号 -> 规范全称/编号/章/节/小标题（按列名取，缺列时回退旧列序）"""
     import openpyxl
     wb = openpyxl.load_workbook(XLSX, read_only=True)
     ws = wb["语料库"]
+    rows = list(ws.iter_rows(values_only=True))
+    head = [str(x or "").strip() for x in (rows[0] if rows else [])]
+    idx = dict(
+        name=_idx(head, "规范全称", default=0),
+        code=_idx(head, "规范编号", default=1),
+        zhang=_idx(head, "章", default=2),
+        jie=_idx(head, "节", default=3),
+        no=_idx(head, "条文号", default=4),
+        title=_idx(head, "条文小标题", "小标题", default=5),
+    )
     meta = {}
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        meta[str(r[4])] = dict(name=str(r[0]), code=str(r[1]), zhang=str(r[2]),
-                               jie=str(r[3]), title=str(r[5] or ""))
+    for r in rows[1:]:
+        def get(k):
+            i = idx.get(k)
+            return r[i] if (i is not None and i < len(r)) else None
+        if get("no") is None:
+            continue
+        meta[str(get("no"))] = dict(name=str(get("name") or ""), code=str(get("code") or ""),
+                                    zhang=str(get("zhang") or ""), jie=str(get("jie") or ""),
+                                    title=str(get("title") or ""))
+    wb.close()
     return meta
 
 
