@@ -2,7 +2,7 @@
 name: engineering-code-chunking
 description: 把中国工程建设标准（GB 规范、消防规范、建筑设计规范等）的 PDF/OCR 文本切成可溯源、可检索的层级语料库（章/节/条/款 + 表格），并生成父子块 RAG 切片。用于"规范条文结构化""语料库建设""知识库切分""条文级检索溯源""消防规范问答"这类任务。已在两部真实规范上验证：GB 55037-2022 + 高层民用建筑消防安全管理规定（292 条 / 940 切片，20 题验收 20/20）、GB 50565-2010 纺织工程设计防火规范（172 条 / 281 切片，命中@3 12/13）。含 PDF 体检、图片表格 OCR、6 类解析踩坑与修法。不要用于没有编号层级的自由文本（用语义切分）。
 metadata:
-  version: "1.7.5"
+  version: "1.7.6"
   domain: 工程建设规范 / RAG 语料库
 ---
 
@@ -328,7 +328,7 @@ python scripts/export_for_platform.py
 - [references/retrieval-tuning.md](references/retrieval-tuning.md) — **检索调参实验记录**：什么有效（原则条款降权）、什么试过没用（扩展放大/前提降权都是负优化）、词法检索的天花板、实验纪律
 - [references/acceptance-design.md](references/acceptance-design.md) — **验收题设计**：期望值必须先核实（三次写错期望的实例）、一题多正解、四维判分口径、合格拒答的标准
 
-''### 表格切片：自研坐标聚类行不通，必须用表格结构识别模型
+### 表格切片：自研坐标聚类行不通，必须用表格结构识别模型
 
 **踩过的坑**：自研的"按坐标聚类猜行列"做了 5 版全失败 —— 竖排表头
 （`厂内`/`主要`/`道路` 各占一行）和合并单元格猜不准，且猜错时不报错。
@@ -456,13 +456,67 @@ only_ocr  = ocr - mine    # 我可能漏读
 
 详见 [references/pdf-to-corpus-walkthrough.md](references/pdf-to-corpus-walkthrough.md)。
 
-### 校验脚本的价值（实测）'
+### 校验脚本的价值（实测）
 
 它抓出过真实缺陷：某条 `8.1.12` 有 9 款，但第 4 款（仓库）丢了、第 5 款重复，
 导致切片 ID 重复 `8.1.12#5`，且 `列项明细` 与 `RAG切片` 两张表同时错。
 **这种错人工翻表很难发现，但会让"仓库要不要设消防水泵接合器"永远答不出来。**
 
 交付前跑一遍，别跳过。
+
+## 脚本总索引（29 个）
+
+**调用约定**：所有脚本用 `python scripts/<name>.py <参数>`，参数见下表。
+6 个会写文件的脚本支持 `--help` 但与其余脚本一致要求显式传参；缺参时 exit=2，不执行。
+
+### 核心库
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/raglib.py` | 公共库：BM25 检索、父子块渲染、表格切片构建、语料库发现。被其余脚本 import |
+
+### 建库流水线（按执行顺序）
+
+| 脚本 | 参数 | 作用 |
+|---|---|---|
+| `scripts/pdf_probe.py` | `<PDF>` | **开工第一步**：页数/文字层字符数/图片表格数量/是否需 OCR |
+| `scripts/ocr_table_image.py` | `<图片>` | 用 rapid_table 识别单张表格图，输出 HTML 结构 |
+| `scripts/transcribe_appendix_a.py` | 无（改脚本内数据） | 附录 A 转录（生产火灾危险性分类） |
+| `scripts/transcribe_appendix_b.py` | 无（改脚本内数据） | 附录 B 转录（储存火灾危险性分类） |
+| `scripts/calibrate_table_columns.py` | `<_pipeline目录>` | 人工/规则校准表格列名 ⚠️ 覆盖已有校准 |
+| `scripts/calibrate_from_vision.py` | `<_pipeline目录>` | 用视觉读图结果校准网格 ⚠️ 覆盖已有校准 |
+| `scripts/build_table_facts.py` | `<_pipeline目录>` | 生成自包含事实句 → `table_facts.json` |
+| `scripts/export_for_platform.py` | `--corpus <xlsx> --out <dir>` | 导出可直接导入平台的 markdown |
+| `scripts/fix_defects.py` | `<xlsx>` | 按缺陷扫描结果批量修复 |
+
+### 质检与验收
+
+| 脚本 | 参数 | 作用 |
+|---|---|---|
+| `scripts/validate_chunks.py` | `<xlsx>` | 结构校验：ID 唯一、孤儿、悬空父条、款数一致、款号连续性 |
+| `scripts/scan_defects.py` | `<xlsx>` | 12 类字符/结构缺陷扫描 |
+| `scripts/crosscheck_corpus.py` | `--pdf <PDF> --xlsx <xlsx>` | **独立交叉复核**：换代码路径重算，查漏条/编造/断号/串条 |
+| `scripts/audit_appendix_transcription.py` | `--pipeline <dir>` | 附录转录与原图 OCR 交叉核对 |
+| `scripts/grade_table_quality.py` | `<xlsx>` | 表格质量分级打分 |
+| `scripts/eval_full_corpus.py` | `--corpus <xlsx>` | 全量检索验收（条文/表格/附录/反向四类） |
+| `scripts/preverify_test_questions.py` | `--corpus <xlsx>` | 交付前预验证测试题（答案是否在 top-k 上下文） |
+| `scripts/eval_md_as_knowledge_base.py` | `--md-dir <dir>` | 模拟平台切块后检索（多档 chunk_size） |
+| `scripts/stress_md_chunking.py` | `--md-dir <dir>` | md 分块压力测试 |
+| `scripts/compare_chunking.py` | `[--xlsx <xlsx>]` | **四种切分策略对比实验**（正则/定长/到条/父子块） |
+| `scripts/diagnose_misses.py` | 无 | 诊断检索失败原因 |
+| `scripts/list_principle_clauses.py` | 无 | 列出原则性条款（降权用） |
+
+### 表格专项
+
+| 脚本 | 参数 | 作用 |
+|---|---|---|
+| `scripts/eval_table_single.py` | `<xlsx>` | 单表问答验收 |
+| `scripts/eval_table_facts.py` | `<xlsx>` | 事实句完整性验收 |
+| `scripts/eval_table_readability.py` | `<xlsx>` | 三层可读性（L1找到/L2归属/L3读懂）评分 |
+| `scripts/eval_reverse_lookup.py` | `--corpus <xlsx>` | 反向检索（从值找对象）验收 |
+| `scripts/compare_vision_vs_ocr.py` | `--pipeline <dir>` | 视觉读图 vs OCR 数值多重集比对 |
+| `scripts/verify_vlm_crosscheck.py` | `<_pipeline目录>` | 同上，VLM 结果交叉验证 |
+| `scripts/vlm_table_to_facts.py` | `--image <图> [--out <json>]` | 调视觉模型把表格图转成事实句 |
 
 ## 边界（先说清楚，别过度承诺）
 
