@@ -10,6 +10,25 @@ from pathlib import Path
 
 import fitz
 
+def _has_required_args():
+    """至少给一个非选项参数；--help/-h 视为合法的「不执行」请求。"""
+    import sys as _sys
+    args = [a for a in _sys.argv[1:] if not a.startswith("-")]
+    return len(args) >= 1
+
+
+
+# --- 参数守卫（自动加入，见 skill 审计修复）---
+# 本脚本必须显式传参，否则会改写下游文件。
+# 早期版本没有这段守卫：`python pdf_probe.py --help` 会直接执行并覆盖 _pipeline 数据。
+_USAGE = """python pdf_probe.py <PDF路径>
+  PDF 体检：页数、文字层字符数、图片表格数量、是否需 OCR"""
+if not _has_required_args():
+    import sys as _sys
+    _sys.stderr.write("用法:\n" + _USAGE + "\n")
+    _sys.exit(0 if any(a in ("-h", "--help") for a in _sys.argv) else 2)
+# --- 守卫结束 ---
+
 pdf = sys.argv[1]
 doc = fitz.open(pdf)
 print(f"页数: {doc.page_count}")

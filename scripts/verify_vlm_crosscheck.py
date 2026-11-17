@@ -13,6 +13,25 @@ import re
 import sys
 from pathlib import Path
 
+def _has_required_args():
+    """至少给一个非选项参数；--help/-h 视为合法的「不执行」请求。"""
+    import sys as _sys
+    args = [a for a in _sys.argv[1:] if not a.startswith("-")]
+    return len(args) >= 1
+
+
+
+# --- 参数守卫（自动加入，见 skill 审计修复）---
+# 本脚本必须显式传参，否则会改写下游文件。
+# 早期版本没有这段守卫：`python verify_vlm_crosscheck.py --help` 会直接执行并覆盖 _pipeline 数据。
+_USAGE = """python verify_vlm_crosscheck.py <_pipeline目录>
+  视觉读图结果 vs OCR 结果的数值多重集比对"""
+if not _has_required_args():
+    import sys as _sys
+    _sys.stderr.write("用法:\n" + _USAGE + "\n")
+    _sys.exit(0 if any(a in ("-h", "--help") for a in _sys.argv) else 2)
+# --- 守卫结束 ---
+
 CASE = Path(sys.argv[1]).parent / "_pipeline"
 tabs = json.loads((CASE / "tables_ocr.json").read_text(encoding="utf-8"))
 cal = json.loads((CASE / "table_columns_calibrated.json").read_text(encoding="utf-8"))

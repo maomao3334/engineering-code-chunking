@@ -18,6 +18,26 @@ import re
 import sys
 from pathlib import Path
 
+def _has_required_args():
+    """至少给一个非选项参数；--help/-h 视为合法的「不执行」请求。"""
+    import sys as _sys
+    args = [a for a in _sys.argv[1:] if not a.startswith("-")]
+    return len(args) >= 1
+
+
+
+# --- 参数守卫（自动加入，见 skill 审计修复）---
+# 本脚本必须显式传参，否则会改写下游文件。
+# 早期版本没有这段守卫：`python build_table_facts.py --help` 会直接执行并覆盖 _pipeline 数据。
+_USAGE = """python build_table_facts.py <_pipeline目录>
+  从 tables_ocr.json + table_columns_calibrated.json 生成事实句
+  产出 <_pipeline>/table_facts.json"""
+if not _has_required_args():
+    import sys as _sys
+    _sys.stderr.write("用法:\n" + _USAGE + "\n")
+    _sys.exit(0 if any(a in ("-h", "--help") for a in _sys.argv) else 2)
+# --- 守卫结束 ---
+
 CASE = Path(sys.argv[1]).parent / "_pipeline"
 # 注意：同一页可能有**多张表**（p11 就有两张：可燃材料堆场 / 原麻等）。
 # 用 page 当 key 会让后者覆盖前者 —— 实测因此把第二张表的数据错配到第一张。
