@@ -2,7 +2,7 @@
 name: engineering-code-chunking
 description: 把中国工程建设标准（GB 规范、消防规范、建筑设计规范等）的 PDF/OCR 文本切成可溯源、可检索的层级语料库（章/节/条/款 + 表格），并生成父子块 RAG 切片。用于"规范条文结构化""语料库建设""知识库切分""条文级检索溯源""消防规范问答"这类任务。已在两部真实规范上验证：GB 55037-2022 + 高层民用建筑消防安全管理规定（292 条 / 940 切片，20 题验收 20/20）、GB 50565-2010 纺织工程设计防火规范（172 条 / 281 切片，命中@3 12/13）。含 PDF 体检、图片表格 OCR、6 类解析踩坑与修法。不要用于没有编号层级的自由文本（用语义切分）。
 metadata:
-  version: "1.7.4"
+  version: "1.7.5"
   domain: 工程建设规范 / RAG 语料库
 ---
 
@@ -19,6 +19,38 @@ metadata:
 - 需要后续扩容（再来 10 部、200 部规范）
 
 **不要用**：科普教材、条文说明、案例文书、无编号的自由文本——那些没有显式层级，应该用语义切分。
+
+## 依赖（跑脚本前先确认）
+
+**必需**（缺任一个，脚本直接失败）：
+
+```bash
+pip install openpyxl pymupdf numpy pyyaml
+```
+
+| 包 | 用途 | 哪些脚本需要 |
+|---|---|---|
+| `openpyxl` | 读写语料库 xlsx | 几乎全部 |
+| `pymupdf` (`import fitz`) | PDF 解析与页图导出 | `pdf_probe` `ocr_table_image` 等 |
+| `numpy` | 表格质量打分 | `grade_table_quality` |
+| `pyyaml` (`import yaml`) | 读 SKILL frontmatter | 部分工具 |
+
+**可选**（缺了只影响对应功能，不影响主流程）：
+
+| 包 | 用途 | 缺失后果 |
+|---|---|---|
+| `pdfplumber` | PDF 逐字抽取、表格页导出 | `pdf_probe` 的字符统计退化为 PyMuPDF |
+| `rapid_table` | 表格结构识别（SLANet-Plus） | 无法自动识别图片表格，需人工录 |
+| `Pillow` (`PIL`) | 图片放大/裁剪 | 视觉读图预处理不可用 |
+| `anthropic` | 调用视觉大模型读表 | `vlm_table_to_facts` 不可用（其余不受影响） |
+
+自查一条命令：
+
+```bash
+python -c "import openpyxl,fitz,numpy;print('必需依赖 OK')"
+```
+
+> 注意：`openpyxl` 版本需 ≥ 3.0（读写 `read_only` 模式）。Python ≥ 3.9。
 
 ## 三条铁律（违反就会出错，且错得很隐蔽）
 

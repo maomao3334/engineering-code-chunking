@@ -21,26 +21,42 @@ from pathlib import Path
 
 
 def _find_corpus():
-    """定位语料库：环境变量 CORPUS_XLSX 优先，否则取工作区里版本号最大的那个。
+    """定位语料库：环境变量 CORPUS_XLSX 优先，否则按顺序搜索。
+
+    搜索顺序：
+        1. 环境变量 CORPUS_XLSX（最明确，推荐）
+        2. **当前工作目录**及其上一级（用户实际项目所在，最常用）
+        3. skill 目录自身（放示例语料时用）
 
     不再硬编码文件名——语料库会随修复迭代版本（v2→v3→v4…），
     硬编码会导致"改了数据但程序还在读旧文件"这种极难排查的问题。
+
+    早期版本只搜 skill 目录自身，导致在别的工程里 `import raglib`
+    拿到 XLSX=None（skill 目录通常不放语料库）。
     """
     env = os.environ.get("CORPUS_XLSX")
     if env and Path(env).exists():
         return str(Path(env))
-    root = Path(__file__).resolve().parent.parent
-    cands = []
-    for p in root.glob("*语料库_v*.xlsx"):
-        m = re.search(r"_v(\d+)\.xlsx$", p.name)
-        if m:
-            cands.append((int(m.group(1)), p))
-    if not cands:
-        # 找不到时**不抛错**：build_table_slices 等纯函数不依赖 XLSX，
-        # 生成流水线（先算切片、后写 xlsx）需要能加载本模块。
-        # 真正用到 XLSX 的 load_* 会自己报错。
-        return None
-    return str(max(cands)[1])
+
+    roots = [Path.cwd(), Path.cwd().parent,
+             Path(__file__).resolve().parent.parent]
+    seen = set()
+    for root in roots:
+        if root in seen or not root.exists():
+            continue
+        seen.add(root)
+        cands = []
+        for p in root.glob("*语料库_v*.xlsx"):
+            m = re.search(r"_v(\d+)\.xlsx$", p.name)
+            if m:
+                cands.append((int(m.group(1)), p))
+        if cands:
+            return str(max(cands)[1])
+
+    # 找不到时**不抛错**：build_table_slices 等纯函数不依赖 XLSX，
+    # 生成流水线（先算切片、后写 xlsx）需要能加载本模块。
+    # 真正用到 XLSX 的 load_* 会自己报错。
+    return None
 
 
 XLSX = _find_corpus()
