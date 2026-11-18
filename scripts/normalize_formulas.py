@@ -342,7 +342,7 @@ def check_text(text):
         if BARE_CMD.search(seg) or "$$" in seg:
             probs.append((text[:m.start()].count("\n") + 1,
                           "公式被包进代码块（不渲染）"))
-    # 去重（同一行多个问题只报一次主问题）
+    # 去重（同一行多个问题只报一次主问题）+ 按行号排序
     seen = set()
     uniq = []
     for ln, msg in probs:
@@ -350,7 +350,7 @@ def check_text(text):
             continue
         seen.add(ln)
         uniq.append((ln, msg))
-    return uniq
+    return sorted(uniq, key=lambda x: x[0])
 
 
 def main():
