@@ -17,10 +17,14 @@
     7. 【新增】父块正文必须含该条全部款（铁律 1 的落地校验）
     8. 【新增】款正文洁净度：款不得以 图/表/注/附图/附表 开头（页级元素污染检查）
     9. 【新增】公式占位与「公式明细」一一对应
+    9b.【v1.10.2】公式分级落地：高可信公式必须写入切片（带「整理式·非原文逐字」标记与表达式），
+         中/低可信只留「待核·未引入表达式」占位且表达式不得出现在切片，切片不得残留裸占位
+        （明细有「LaTeX」或「正文处理」列时才启用；逐项诊断由 formula_details.py 提供）
 
 只依赖 openpyxl。不修改输入文件。
 """
 import argparse
+import os
 import re
 import sys
 from collections import Counter, defaultdict
@@ -277,6 +281,21 @@ def main():
             if ph != detail:
                 warns.append(f"公式占位与明细条数不一致：占位 {n_ph} / 明细 {n_detail}")
 
+    # ---- 9b. v1.10.2 公式分级落地（高可信写入切片 / 中低可信只留待核 / 无裸占位）
+    f_info = {}
+    if "公式明细" in wb.sheetnames:
+        fhead2, _frows2 = load(wb, "公式明细")
+        if has_col(fhead2, "正文处理") or has_col(fhead2, "LaTeX"):
+            try:
+                import formula_details as fd
+            except ImportError:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import formula_details as fd
+            ft = fd.FormulaTable.from_xlsx(a.xlsx)
+            f_errs, f_warns, f_info = ft.check(a.xlsx)   # 切片级校验（md 级由 md 体检/导出闸门负责）
+            errs.extend(f_errs)
+            warns.extend(f_warns)
+
     # ---- 报告 ----
     print(f"文件：{a.xlsx}")
     print(f"语料库：{len(corpus)} 条" +
@@ -288,6 +307,9 @@ def main():
         print(f"款检查：{len(kuan_rows)} 款｜款正文污染 {len(dirty)} 处｜父块缺款 {len(lost_kuan)} 处")
     if n_ph or n_detail:
         print(f"公式占位：正文 {n_ph} 个 ｜「公式明细」{n_detail} 行")
+    if f_info:
+        print(f"公式分级：共 {f_info.get('total')} 条（写入正文 {f_info.get('write')} / "
+              f"待核占位 {f_info.get('pending')}）｜切片 {f_info.get('slices')} 个已校验落地")
     print()
 
     for w in warns:
