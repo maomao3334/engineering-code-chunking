@@ -127,6 +127,35 @@ def latex_to_plain(s):
             else:
                 txt = txt + comb if txt else txt
             s = s[:m.start()] + txt + s[p:]
+    # 0.5) \begin{cases}…\end{cases} → 「{ 值（条件）；值（条件） }」
+    #      实测踩过：不处理的话纯文本会退化成
+    #      「T_i = begincases T_(s,i) & (z_i < z_j) ； … endcases」，人看不懂
+    while True:
+        m = re.search(r"\\begin\{cases\}(.+?)\\end\{cases\}", s, re.S)
+        if not m:
+            break
+        rows = re.split(r"\\\\\s*(?:\[[^\]]*\])?", m.group(1))
+        parts = []
+        for row in rows:
+            row = row.strip()
+            if not row:
+                continue
+            if "&" in row:
+                v, c = row.split("&", 1)
+                cond = latex_to_plain(c.strip())
+                if cond.startswith("(") and cond.endswith(")"):
+                    cond = cond[1:-1].strip()      # 避免「（(z_i<z_j)）」双括号
+                parts.append("%s（%s）" % (latex_to_plain(v.strip()), cond))
+            else:
+                parts.append(latex_to_plain(row))
+        piece = "{ " + "；".join(parts) + " }"
+        s = s[:m.start()] + piece + s[m.end():]
+    # 0.6) 其它环境（array / matrix）先剥壳，内容按行拼
+    s = re.sub(r"\\begin\{(?:array|matrix|pmatrix|bmatrix)\}\{[^}]*\}", "", s)
+    s = re.sub(r"\\end\{(?:array|matrix|pmatrix|bmatrix)\}", "", s)
+    # 0.7) 换行的可选间距 \[6pt]
+    s = re.sub(r"\\\[\s*[\d.]+\s*(?:pt|em|ex)\s*\]", "；", s)
+
     # 1) \frac{a}{b} / \dfrac
     while True:
         m = re.search(r"\\(?:d|t)?frac\s*", s)
@@ -168,7 +197,10 @@ def latex_to_plain(s):
     # 8) 收尾：括号、换行、多余空白
     s = s.replace("\\\\", " ； ").replace("\\", "")
     s = s.replace("{", "").replace("}", "")
+    s = s.replace("&", " ")                      # cases 的 & 已处理，残留的对齐符去掉
     s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"（\s+", "（", s)
+    s = re.sub(r"\s+）", "）", s)
     return s.strip()
 
 
@@ -231,6 +263,41 @@ def _wrap_bare(text, style):
                 rebuilt.append(seg)
         out_lines.append("".join(rebuilt))
     return "\n".join(out_lines)
+
+
+def _space_blocks(text):
+    """块公式前后补空行。
+
+    实测踩过（GB/T 31593.8 附录C 真实页面）：
+        原文是连着的 `\\[ … \\]`，转换后变成
+        　　　　　(上一条公式)
+        > 纯文本：T_i = T_(a,i) (C.22)
+        $$
+        T_j = T_(a,j) (C.23)
+        $$
+        `$$` 紧跟在引用行后面 → Markdown 认为它还是同一段，**块公式不渲染**。
+    """
+    lines = text.split("\n")
+    out = []
+    in_math = False
+    for ln in lines:
+        s = ln.strip()
+        if not in_math and s.startswith("$$"):
+            if out and out[-1].strip() != "":
+                out.append("")
+            in_math = True
+            out.append(ln)
+            continue
+        if in_math and s.startswith("$$"):
+            out.append(ln)
+            in_math = False
+            continue
+        if not in_math and s != "" and out and out[-1].strip() != "":
+            prev = out[-1].strip()
+            if prev.startswith("> 纯文本：") or prev.startswith("$$"):
+                out.append("")
+        out.append(ln)
+    return "\n".join(out)
 
 
 def normalize_text(text, style="both"):
@@ -303,6 +370,8 @@ def normalize_text(text, style="both"):
         text = text.replace(k, v)
     for i, f in enumerate(fences):
         text = text.replace(f"\x00FENCE{i}\x00", f)
+    # 5) 块级公式前后补空行（否则 `$$` 会被当成上一段的续行，不渲染）
+    text = _space_blocks(text)
     return text, st
 
 
@@ -314,6 +383,34 @@ def _blank_math(text):
 
 
 BARE_STRUCT = re.compile(r"\^\{|_\{|\\\(")
+
+ENV_OPEN = re.compile(r"\\begin\{([^}]*)\}")
+ENV_CLOSE = re.compile(r"\\end\{([^}]*)\}")
+
+
+def _math_syntax_error(body):
+    """数学区语法自检：括号配平 / \\left-\\right 配对 / \\begin-\\end 配对。
+
+    为什么要有：视觉转录最容易漏一个 `}` 或把 `\\end{cases}` 写丢，
+    这种公式 MathJax 会**整条报错不渲染**，但人眼扫一遍往往看不出来。
+    """
+    depth = 0
+    for ch in body:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return "花括号多了一个 }"
+    if depth != 0:
+        return f"花括号不配平（多 {depth} 个 {{）"
+    if len(re.findall(r"\\left\b", body)) != len(re.findall(r"\\right\b", body)):
+        return "\\left 与 \\right 数量不等"
+    opens = ENV_OPEN.findall(body)
+    closes = ENV_CLOSE.findall(body)
+    if sorted(opens) != sorted(closes):
+        return f"\\begin/\\end 不配对：{opens} vs {closes}"
+    return ""
 
 
 # ---------------------------------------------------------------- 体检
@@ -335,6 +432,9 @@ def check_text(text):
         if "\\_" in m.group(0):
             probs.append((clean[:m.start()].count("\n") + 1,
                           "数学区内有 Markdown 转义 \\_（应为 _）"))
+        err = _math_syntax_error(m.group(0))
+        if err:
+            probs.append((clean[:m.start()].count("\n") + 1, "公式语法错误：" + err))
 
     # 公式被塞进代码块
     for m in CODE_FENCE.finditer(text):
