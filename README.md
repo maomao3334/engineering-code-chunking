@@ -51,11 +51,14 @@ scripts/
   scan_defects.py                         12 类 OCR 字符缺陷扫描
   fix_defects.py                          自动修复
   compare_chunking.py                     四种切分策略对比实验
-  verify_delivery.py                      交付前一键验收（串起四关，汇总四项指标）
+  verify_delivery.py                      交付前一键验收（串起六关，汇总指标）
   lint_schema.py                          schema 体检（页签/列/表格来源标注/质检报告占位）
   build_review_workbench.py               生成人工复审工作台（按不确定度降序排队列，含 md 文件+行号）
   collect_review_results.py               回收复审结果 → overrides.json + 汇总报告
-  export_for_platform.py                  导出 markdown/json/分段文本
+  export_for_platform.py                  导出 markdown/json/分段文本（自动按国标编号建目录）
+  md_normalize.py                         md 表格规范化（GFM 空行/分隔行/伪表格→真表）★v1.10.0
+  normalize_formulas.py                   LaTeX 公式 → 可渲染 md + 纯文本对照 ★v1.10.0
+  diagnose_source_defects.py              源 PDF 缺陷自诊断（表图跨页复用等）★v1.10.0
   diagnose_misses.py                      诊断"为什么没命中"（排名/分数/token 交集）
   list_principle_clauses.py               列出原则/引述条款（检索降权依据）
 assets/                                   示例产出（评测集、缺陷报告、导出说明）
@@ -97,7 +100,23 @@ python scripts/list_principle_clauses.py --rag ./rag  # 该降权的条款清单
 
 ## 版本
 
-- **v1.9.0**（当前）：**把 12 条待办全部落地**。新增 `verify_delivery.py`（一条命令跑完四关）、
+- **v1.10.0**（当前）：**交付格式四条硬规范**，解决四个真实踩坑：
+  1. **md 表格不渲染**：GFM 规定「表格不能打断段落」，而渲染器把表标题紧贴表体、
+     「数据行」还写成没有行首竖线的伪表格 → Obsidian 里全是竖线文本。
+     `raglib` 改为输出合法 GFM 表（前后空行 + 分隔行 + 列数补齐），
+     新增 `md_normalize.py` 可对**旧版导出目录**一键修（实测 GB 50193 旧导出 11 张表全部缺空行 → 修完 0）。
+  2. **公式是 LaTeX 看不懂**：扫描版规范（GB/T 31593.8-2015，25 页 0 文字）
+     视觉转录出来是裸 LaTeX。新增 `normalize_formulas.py`：统一 `$…$`/`$$…$$`、
+     去 `\_` 转义，每条独立公式补一行 `> 纯文本：…`（√ × ≤ 上标 下标都翻好），
+     三种风格 `both/math/plain`，幂等。
+  3. **产物不归拢**：多部规范堆在同一导出目录，交给别的 agent 会互相覆盖。
+     `export_for_platform.py` 改为默认输出到 `<输出根>/GB 55037-2022/`，
+     并自动跑表格+公式规范化。
+  4. **表3.4.1 读不出来**：新增 `diagnose_source_defects.py` 在切分前体检源 PDF。
+     实测 GB 50222-1995：表3.4.1 与表3.2.1 **共用同一图片对象 xref=84**（p7/p10 同 md5）
+     ——源文件缺陷，不是切分/OCR 的锅，只能换源或人工补录。
+  `verify_delivery.py` 增第⑥关 md 格式体检（含导出目录命名检查）。
+- **v1.9.0**：**把 12 条待办全部落地**。新增 `verify_delivery.py`（一条命令跑完四关）、
   `lint_schema.py`（页签/列/「表格明细.来源」契约体检，缺列即失败）、`collect_review_results.py`
   （复审回填 → `overrides.json` 闭环）；`validate_chunks.py` 增「父块含全部款」「款正文洁净度」
   「公式占位↔公式明细」三条断言与 `--allow-suffix`；`scan_defects.py` 增例外字典与默认跳过说明性页签、

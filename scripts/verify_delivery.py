@@ -49,6 +49,8 @@ def main():
     ap.add_argument("--allow", default="",
                     help="独立复核的已知疑点条号，逗号分隔（如 5.1.1A），透传给 crosscheck_corpus")
     ap.add_argument("--json", dest="json_out", default="", help="机器可读验收结果")
+    ap.add_argument("--export-dir", default="",
+                    help="导出目录（提供则跑第⑥关：md 表格/公式格式体检 + 目录命名）")
     a = ap.parse_args()
 
     if not os.path.isfile(a.corpus):
@@ -110,6 +112,27 @@ def main():
     else:
         steps.append(("⑤ 复审工作台", None, "已按参数跳过", ""))
 
+    # 6. 导出目录的 md 格式体检（表格空行 / 公式定界 / 目录命名）
+    #    为什么单独一关：这两类问题**不影响检索召回**，只在人打开 md 时暴露，
+    #    所以前四关全绿也可能带着它们交付（实测踩过：Obsidian 里表不渲染）。
+    if a.export_dir:
+        ed = Path(a.export_dir)
+        if not ed.is_dir():
+            steps.append(("⑥ md 格式体检", False, f"目录不存在：{ed}", ""))
+        else:
+            c1, o1 = run([str(HERE / "md_normalize.py"), str(ed), "--check"])
+            c2, o2 = run([str(HERE / "normalize_formulas.py"), str(ed), "--check"])
+            bad_t = grab(r"共 (\d+) 个文件有问题", o1, "0")
+            bad_f = grab(r"共 (\d+) 个文件有问题", o2, "0")
+            # 目录命名：应以规范编号命名（含 GB/GBT 编号），不能叫「导出」「output」
+            name_ok = bool(re.search(r"GB\s*/?\s*T?\s*\d", ed.name))
+            ok6 = (c1 == 0 and c2 == 0 and name_ok)
+            brief = (f"表格异常 {bad_t} 个｜公式异常 {bad_f} 个｜"
+                     f"目录名 {'合规' if name_ok else '未含国标编号'}")
+            steps.append(("⑥ md 格式体检", ok6, brief, o1 + "\n" + o2))
+    else:
+        steps.append(("⑥ md 格式体检", None, "未提供 --export-dir，跳过", ""))
+
     # ---------- 汇总 ----------
     W = 78
     print("=" * W)
@@ -129,7 +152,10 @@ def main():
     if failed:
         print(f"❌ 验收未通过：{failed} 关失败（明细见 {work}）")
     else:
-        print("✅ 四关通过：" + "；".join(s[2] for s in steps[:4]))
+        print("✅ 核心四关通过：" + "；".join(s[2] for s in steps[:4]))
+        rest = [s for s in steps[4:] if s[1] is True]
+        if rest:
+            print("   " + "；".join(f"{s[0]} {s[2]}" for s in rest))
         print(f"   产物目录：{work}")
     print("=" * W)
 

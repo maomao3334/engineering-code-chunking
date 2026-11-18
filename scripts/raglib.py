@@ -466,17 +466,23 @@ def build_table_slices(meta, link, tables, facts=None, calibrated=None):
         if grows:
             keys = sorted((int(k) for k in cal.get("cols", {})), key=int)
             rlabels = {int(k): v for k, v in (cal.get("row_labels") or {}).items()}
+            L.append("")
             L.append("数据行（视觉读图 + 逐块核对，未列出的格为「—」）：")
-            L.append("  行标签 | " + " | ".join(str(k) for k in keys))
+            # 合法 GFM 表格：行首竖线 + 分隔行 + 空行
+            L.append("")
+            L.append("| 行标签 | " + " | ".join(str(k) for k in keys) + " |")
+            L.append("|" + "---|" * (len(keys) + 1))
             for r in sorted(int(x) for x in grows):
                 vals = grows[str(r)]
                 cells = [str(vals[i]) if i < len(vals) and vals[i] is not None else "—"
                          for i in range(len(keys))]
-                L.append(f"  {rlabels.get(r, '')[:30]} | " + " | ".join(cells))
+                L.append(f"| {rlabels.get(r, '')[:30]} | " + " | ".join(cells) + " |")
         else:
+            L.append("")
             L.append("原始数据行（OCR 网格，列对齐可能有偏差，以事实句为准）：")
+            L.append("")
             L.append("| " + " | ".join(t["header"]) + " |")
-            L.append("|" + "|".join(["---"] * len(t["header"])) + "|")
+            L.append("|" + "---|" * len(t["header"]))
             for row in t["rows"]:
                 L.append("| " + " | ".join(x or "—" for x in row) + " |")
         body = "\n".join(L)
@@ -664,7 +670,8 @@ class Retriever:
                 rp = self.parents.get(rno)
                 if rp:
                     parts.append(f"【被引用条文 {rno}】\n" + rp["text"])
-        return "\n".join(parts)
+        # 段与段之间必须空一行：md 里「表格紧贴上一段」会导致整块不渲染
+        return "\n\n".join(x for x in parts if x and x.strip())
 
     def table_md(self, parent):
         """该条引用的表，渲染成「列索引 + 数据行」。
@@ -770,7 +777,13 @@ class Retriever:
 
             L.append("数据行（视觉读图 + 逐块核对；"
                      "「—」=原表无要求，非数字格按文字给出）：")
-            L.append("  行标签 | " + " | ".join(str(k) for k in keys))
+            # 必须输出**合法 GFM 表格**：行首竖线 + 分隔行 + 前后空行。
+            # 实测踩过：写成「  行标签 | 1 | 2」这种伪表格，
+            # Obsidian/GFM 里根本不渲染，人看到的就是一堆竖线文本；
+            # 而且标题行紧贴表体时，GFM「表格不能打断段落」→ 整块不渲染。
+            L.append("")
+            L.append("| 行标签 | " + " | ".join(str(k) for k in keys) + " |")
+            L.append("|" + "---|" * (len(keys) + 1))
             for r in sorted(int(x) for x in grows):
                 vals = grows[str(r)]
                 tc = tc_by_row.get(r, {})
@@ -782,7 +795,8 @@ class Retriever:
                     else:
                         v = vals[i] if i < len(vals) else None
                         cells.append(str(v) if v is not None else "—")
-                L.append(f"  {rlabels.get(r, '')} | " + " | ".join(cells))
+                L.append(f"| {rlabels.get(r, '')} | " + " | ".join(cells) + " |")
+            L.append("")
             return "\n".join(L)
 
         # 无校准数据：回退 OCR 网格，并明确标注不可靠
@@ -792,10 +806,15 @@ class Retriever:
             L.append("  " + "；".join(f"列{i}={c}" for i, c in named))
         body = grid[data_start:] if data_start < len(grid) else grid
         L.append("原始数据行（OCR 网格，以事实句为准）：")
+        # 同样必须是合法 GFM 表格（行首竖线 + 分隔行 + 前面空行）
+        L.append("")
+        L.append("| " + " | ".join(f"列{i + 1}" for i in range(ncol)) + " |")
+        L.append("|" + "---|" * ncol)
         for row in body:
             cells = [str(x or "—") for x in row[:ncol]]
             cells += ["—"] * (ncol - len(cells))
             L.append("| " + " | ".join(cells) + " |")
+        L.append("")
         return "\n".join(L)
 
     def refs_of(self, parent):
@@ -848,7 +867,8 @@ class Retriever:
                 rt = self.table_md(ref)
                 if rt:
                     parts.append(rt)
-        return "\n".join(x for x in parts if x)
+        # 段间空行（md 可读性；表格前必须有空行才会渲染）
+        return "\n\n".join(x for x in parts if x and x.strip())
 
 
 if __name__ == "__main__":

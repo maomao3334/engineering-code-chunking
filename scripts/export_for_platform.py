@@ -55,11 +55,30 @@ def safe_filename(s):
     return s.strip("_")
 
 
+def safe_folder_name(s):
+    """目录名：保留空格（国标编号本来就是「GB 55037-2022」这种写法），
+    只把 Windows 非法字符换成短横线，去掉结尾的点和空格。
+
+    为什么不复用 safe_filename：它把空格换成下划线，导出目录会变成
+    `GB_55037-2022`，和规范编号对不上，人一眼看不出是哪一部。
+    """
+    s = re.sub(r'[\\/:*?"<>|]+', "-", str(s)).strip()
+    s = s.rstrip(". ")
+    return s or "UNKNOWN"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(HERE / "导出"),
-                    help="输出目录（默认 export/导出）")
+                    help="输出根目录（默认 export/导出）；实际会再套一层以国标编号命名的子目录")
     ap.add_argument("--corpus", default=None, help="指定语料库 xlsx")
+    ap.add_argument("--flat", action="store_true",
+                    help="不再套「国标编号」子目录（默认套：<out>/GB 55037-2022/）")
+    ap.add_argument("--formula-style", default="both",
+                    choices=["both", "math", "plain"],
+                    help="公式写法：both=MathJax+纯文本（默认）；math=只 MathJax；plain=只纯文本")
+    ap.add_argument("--no-normalize", action="store_true",
+                    help="跳过 md 规范化（表格空行 / 公式）——不建议")
     a = ap.parse_args()
 
     if a.corpus:
@@ -69,7 +88,21 @@ def main():
     from raglib import Retriever
     r = Retriever(use_table_slices=True, use_expand=True, child_weight=0.8)
 
-    out = Path(a.out)
+    # ---- 规范编号（决定输出目录名）------------------------------------
+    # 以前导出目录固定叫 export/导出，一个根目录下混着多部规范，
+    # 交给别的 agent 跑时全都堆在一起、无法区分。规定：<out>/<规范编号>/。
+    code_of = {}
+    for no, p in r.parents.items():
+        parts = p["header"].split("｜")
+        code_of[no] = parts[0].split("》")[-1].strip() if "》" in parts[0] else ""
+    spec_code = next((v for v in code_of.values() if v), "")
+    if not spec_code:
+        from raglib import XLSX as _X
+        spec_code = Path(_X).stem
+    folder = safe_folder_name(spec_code)       # 保留空格，如「GB 55037-2022」
+    out = Path(a.out) / ("" if a.flat else folder)
+    print(f"规范编号：{spec_code}　→　输出目录：{out}\n")
+
     md_dir = out / "markdown"
     txt_dir = out / "分段文本"
     json_dir = out / "json"
@@ -162,12 +195,7 @@ def main():
     # ---------- 3. JSON ----------
     # 规范编号从语料库实际读取，不能硬编码（原来写死 GB55037-2022，
     # 换成纺织规范后 JSON 里的编号全是错的）。
-    code_of = {}
-    for no, p in r.parents.items():
-        parts = p["header"].split("｜")
-        code_of[no] = parts[0].split("》")[-1].strip() if "》" in parts[0] else ""
-    spec_code = next((v for v in code_of.values() if v), "UNKNOWN")
-
+    # spec_code 已在 main() 开头算过（用于目录命名），这里复用，不再重复推导
     slices = []
     for no, p in sorted(r.parents.items(), key=lambda kv: _sortkey(kv[0])):
         parts = p["header"].split("｜")
@@ -221,6 +249,41 @@ def main():
     (json_dir / "fastgpt_pushdata.json").write_text(
         json.dumps(fastgpt, ensure_ascii=False, indent=1), encoding="utf-8")
 
+    # ---------- 2.5 交付格式规范化（v1.10.0 新增）----------
+    # 为什么放在导出之后统一跑，而不是散在渲染里：
+    #   · 表格：GFM 规定「表格不能打断段落」，标题行紧贴表体 → Obsidian 不渲染；
+    #           还有「行标签 | 1 | 2」这种伪表格，必须转成真表。
+    #   · 公式：PDF 转录出来的 LaTeX 直接落进 md，平台不渲染 → 人看不懂。
+    #   两件事都是纯文本变换，统一跑一遍最稳，也能对旧版本导出目录复用。
+    norm_stats = {}
+    if not a.no_normalize:
+        try:
+            import md_normalize
+            import normalize_formulas
+        except ImportError:
+            sys.path.insert(0, str(HERE))
+            import md_normalize
+            import normalize_formulas
+        st_md = dict(blank=0, table=0, pseudo=0)
+        st_fm = dict(display=0, inline=0, bare=0)
+        targets = list(md_dir.glob("*.md")) + [txt_dir / "全库.md"]
+        for f in targets:
+            if not f.exists():
+                continue
+            raw = f.read_text(encoding="utf-8")
+            t1, s1 = md_normalize.normalize_text(raw)
+            t2, s2 = normalize_formulas.normalize_text(t1, a.formula_style)
+            for k in st_md:
+                st_md[k] += s1[k]
+            for k in st_fm:
+                st_fm[k] += s2[k]
+            if t2 != raw:
+                f.write_text(t2, encoding="utf-8")
+        norm_stats = dict(md=st_md, formula=st_fm)
+        print(f"格式规范化：补空行 {st_md['blank']}｜表格 {st_md['table']} 张"
+              f"（伪表 {st_md['pseudo']}）｜公式 独立 {st_fm['display']} / "
+              f"行内 {st_fm['inline']} / 裸 LaTeX {st_fm['bare']}\n")
+
     # ---------- 说明 ----------
     from raglib import XLSX as _XLSX
     XLSX_NAME = Path(_XLSX).name
@@ -232,9 +295,12 @@ def main():
     max_len = max(md_lens) if md_lens else 0
     n_tbl = sum(1 for s in single if s["有表格"])
     src_name = XLSX_NAME
-    readme = f"""# 语料库导出包
+    readme = f"""# 语料库导出包 · {spec_code}
 
 由 `export/export_for_platform.py` 生成，源语料库：`{src_name}`
+
+输出放在**以规范编号命名的目录**里（`{folder}/`），
+多部规范一起跑时不会互相覆盖、也不会堆在同一个根目录下。
 
 ## 目录
 
@@ -262,8 +328,8 @@ def main():
 
 ### 方式 B：单文件
 
-上传 `分段文本/全库.md`。文件里用 `## 第X条` 作为分段标记，
-支持"按标题分段 / Title Chunker"的平台会直接按条切开。
+上传 `分段文本/全库.md`。文件里用 `## 第X条` 作标题、独立 `---` 行分隔每一条，
+平台的「自定义分隔符」填 `---` 就能做到一条一块（不依赖标题切分）。
 
 ### 方式 C：JSON（需要 API 导入）
 
@@ -278,19 +344,34 @@ def main():
 ```
 《{_first_parent_header}》
 （条文正文，含全部款）
+
 【表X.Y.Z …】
 事实（共 N 条，可直接引用）：
   · 【表X.Y.Z】对象A 与「对象B」的防火间距不应小于 25m。
 列索引（已校准）：
   列1=…；列2=…
+
 数据行（视觉读图 + 逐块核对）：
-  行标签 | 1 | 2 | …
+
+| 行标签 | 1 | 2 | … |
+|---|---|---|---|
+| 对象A | … | … | … |
 ```
 
 第一行是元数据头，**这一行是溯源的关键** —— 模型读到它才知道自己在引用哪一条。
 
+**表格已按 GFM 规范排版**：表标题与表体之间、表格前后都有空行，列数已补齐。
+在 Obsidian / Typora / VS Code 预览里**直接显示成表格**，
+不会再出现「必须手敲空行才渲染」的问题。
+
+**公式按双写法落库**：上面是 `$…$` 渲染式，下面跟一行 `> 纯文本：…`
+（LaTeX 已翻成 √ × ≤ 上标 等可读写法）。平台支持 MathJax 就读上一行，
+不支持时读纯文本行 —— 不会再出现「一堆反斜杠没人看得懂」。
+
 ## 校验
 
+- 规范编号：**{spec_code}**
+- 输出目录：**{folder}/**
 - 条文总数：**{len(single)}** 条
 - 带表格的条文：**{n_tbl}** 条
 - markdown 文件：**{len(md_files)}** 个（含大表的行分片）
@@ -305,9 +386,13 @@ def main():
     print(f"  json/fastgpt_...    {len(fastgpt)} 条（需分 {(len(fastgpt)+199)//200} 次推送）")
     print()
     sizes = [s["字符数"] for s in single]
-    print(f"单个文件字符数：最短 {min(sizes)}，中位 {sorted(sizes)[len(sizes)//2]}，最长 {max(sizes)}")
-    print(f"  → 中位 {sorted(sizes)[len(sizes)//2]} 字，远小于平台默认分段长度（500~1000），")
-    print(f"    所以上传后一个文件就是一个 chunk，不会被切碎。")
+    # 注意区分两个长度：
+    #   single[].字符数 = 拆分**前**的整条渲染长度（大表会被按行拆开）
+    #   md_lens        = 实际落盘的每个文件长度 ← 平台分段要跟这个比
+    print(f"整条渲染长度：最短 {min(sizes)}，中位 {sorted(sizes)[len(sizes)//2]}，"
+          f"最长 {max(sizes)}（最长的会按行拆片）")
+    print(f"实际文件长度：最短 {min(md_lens) if md_lens else 0}，"
+          f"中位 {avg_len}，最长 {max_len} ← 分段长度设 ≥ {max_len} 才不被切碎")
     print()
     n_table = sum(1 for s in single if s["有表格"])
     print(f"带表格的条文：{n_table} 条（表格已渲染成 Markdown 内联进正文）")
